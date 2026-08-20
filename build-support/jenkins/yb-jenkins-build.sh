@@ -34,6 +34,16 @@ Environment variables:
   BUILD_TYPE
     Passed directly to build-and-test.sh. The default value is determined based on the job name
     if this environment variable is not specified or if the value is "auto".
+  YB_BUILD_JAVA
+    Set to 0 to skip building Java code. Default: 1.
+  YB_BUILD_TESTS
+    Set to 0 to skip building C++ and Java test code. Requires YB_COMPILE_ONLY=1, because tests
+    cannot be run if they were not built. Default: 1.
+  YB_SKIP_EXTRA_PG_EXTENSIONS
+    Set to 1 to skip building the extra (non-essential) PG extensions: documentdb (including its
+    pgrx/Rust build) and pg_parquet.
+  YB_SKIP_PG_PARQUET_BUILD
+    Set to 1 to skip building the pg_parquet extension.
 EOT
 }
 
@@ -55,6 +65,7 @@ JOB_NAME=${JOB_NAME:-}
 
 export YB_BUILD_JAVA=${YB_BUILD_JAVA:-1}
 export YB_BUILD_CPP=${YB_BUILD_CPP:-1}
+export YB_BUILD_TESTS=${YB_BUILD_TESTS:-1}
 export YB_PG_PARQUET_DEBUG_CLEAN=1
 
 export COMMON_YB_BUILD_ARGS_FOR_CPP_BUILD=(
@@ -67,6 +78,24 @@ if [[ -n "${YB_PGO_DATA_FILE:-}" && -f "$YB_PGO_DATA_FILE" ]]; then
 fi
 if [[ "${YB_PGO_BOLT:-0}" == "1" ]]; then
   COMMON_YB_BUILD_ARGS_FOR_CPP_BUILD+=( "--bolt" )
+fi
+
+if [[ ${YB_BUILD_TESTS} == "0" ]]; then
+  if [[ ${YB_COMPILE_ONLY:-0} != "1" ]]; then
+    fatal "YB_BUILD_TESTS=0 requires YB_COMPILE_ONLY=1: tests cannot be run if they are not built."
+  fi
+  log "YB_BUILD_TESTS=0: not building C++ or Java tests"
+  COMMON_YB_BUILD_ARGS_FOR_CPP_BUILD+=( "--no-tests" )
+fi
+
+# These options only export the same-named variables, which the PG extension makefiles check.
+# Passed for the sake of logging what the build skips.
+if [[ "${YB_SKIP_EXTRA_PG_EXTENSIONS:-0}" == "1" ]]; then
+  log "YB_SKIP_EXTRA_PG_EXTENSIONS=1: not building documentdb or pg_parquet"
+  COMMON_YB_BUILD_ARGS_FOR_CPP_BUILD+=( "--skip-extra-pg-extensions" )
+elif [[ "${YB_SKIP_PG_PARQUET_BUILD:-0}" == "1" ]]; then
+  log "YB_SKIP_PG_PARQUET_BUILD=1: not building pg_parquet"
+  COMMON_YB_BUILD_ARGS_FOR_CPP_BUILD+=( "--skip-pg-parquet" )
 fi
 
 # -------------------------------------------------------------------------------------------------
