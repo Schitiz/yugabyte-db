@@ -45,6 +45,7 @@ public class TestPgRegressIndex extends BasePgRegressTest {
     flagMap.put("ysql_enable_concurrent_ddl", "false");
     flagMap.merge("allowed_preview_flags_csv", "ysql_enable_concurrent_ddl",
         (e, a) -> e + "," + a);
+    appendToYsqlPgConf(flagMap, "yb_enable_index_backfill_scan_optimization=true");
     return flagMap;
   }
 
@@ -54,5 +55,13 @@ public class TestPgRegressIndex extends BasePgRegressTest {
     // superuser connections when Connection Manager is enabled.
     enableStickySuperuserConnsAndRestartCluster();
     runPgRegressTest("yb_index_schedule");
+  }
+
+  @Test
+  public void schedule2() throws Exception {
+    // (DB-13032) This test touches system tables, so enable stickiness for
+    // superuser connections when Connection Manager is enabled.
+    enableStickySuperuserConnsAndRestartCluster();
+    runPgRegressTest("yb_index2_schedule");
   }
 }
