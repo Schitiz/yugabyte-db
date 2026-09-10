@@ -34,6 +34,7 @@ import api.v2.models.RunScriptRequest;
 import api.v2.models.RunScriptResponse;
 import api.v2.models.ScriptOptions;
 import api.v2.models.UniverseCreateSpec;
+import api.v2.models.UniverseCrossCloudFederationSpec;
 import api.v2.models.UniverseDeleteSpec;
 import api.v2.models.UniverseEditSpec;
 import api.v2.models.UniverseOperatorImportReq;
@@ -51,6 +52,7 @@ import com.google.inject.Inject;
 import com.yugabyte.yw.cloud.UniverseResourceDetails;
 import com.yugabyte.yw.commissioner.Commissioner;
 import com.yugabyte.yw.commissioner.Common;
+import com.yugabyte.yw.commissioner.tasks.ManageCrossCloudFederationUniverse;
 import com.yugabyte.yw.commissioner.tasks.OperatorImportUniverse;
 import com.yugabyte.yw.commissioner.tasks.UniverseTaskBase.ServerType;
 import com.yugabyte.yw.common.AppConfigHelper;
@@ -134,6 +136,7 @@ import java.util.stream.Collectors;
 import javax.validation.Valid;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
+import org.apache.commons.collections4.MapUtils;
 import org.apache.commons.lang3.StringUtils;
 import play.libs.Json;
 import play.mvc.Http.Request;
@@ -304,7 +307,7 @@ public class UniverseManagementHandler extends ApiControllerUtils {
         continue;
       }
       ClusterEditSpec merged = new ClusterEditSpec();
-      ClusterMapper.INSTANCE.deepCopyClusterEditSpecWithoutPlacementSpec(primaryCluster, merged);
+      ClusterMapper.INSTANCE.deepCopyInheritableClusterEditSpec(primaryCluster, merged);
       ClusterMapper.INSTANCE.deepCopyClusterEditSpec(cluster, merged);
       clusters.add(merged);
     }
@@ -317,10 +320,15 @@ public class UniverseManagementHandler extends ApiControllerUtils {
     boolean isNewUI = isNewUI();
     Customer customer = Customer.getOrBadRequest(cUUID);
     Universe dbUniverse = Universe.getOrBadRequest(uniUUID);
-    JsonNode dbUniverseJson = Json.toJson(dbUniverse);
+    JsonNode dbUniverseDetailsJson = Json.toJson(dbUniverse.getUniverseDetails());
+    // Must be captured here, before the edit spec is mapped below: that mapping uses
+    // dbUniverse.getUniverseDetails() as its @MappingTarget, i.e. it overwrites the in-memory
+    // persisted placement with the requested one. Anything read from dbUniverse after that point
+    // reflects the request, not what is deployed.
+    Map<UUID, Map<UUID, K8sStsIndices>> savedK8sStsIndices = captureK8sStsIndices(dbUniverse);
     UniverseCRUDHandler.checkInstanceTypeConsistency(dbUniverse);
     log.info("Edit Universe with v2 spec: {}", prettyPrint(universeEditSpec));
-    // inherit RR cluster properties from primary cluster in given edit spec
+    // Inherit unset RR properties from primary (excludes placement, partitions, nodeSpec).
     UniverseSpec v2Universe =
         UniverseDefinitionTaskParamsMapper.INSTANCE.toV2UniverseSpec(
             dbUniverse.getUniverseDetails());
@@ -390,9 +398,10 @@ public class UniverseManagementHandler extends ApiControllerUtils {
       // Note: userIntent volume overrides are already generated per-cluster inside configure() for
       // EDIT (see UniverseCRUDHandler.configure), and they are keyed only on the AZ set, not on the
       // statefulset index, so there is no need to regenerate them here.
-      applyK8sPlacementFinalization(dbUniverse, v1Params, primaryCluster);
+      applyK8sPlacementFinalization(savedK8sStsIndices, v1Params, primaryCluster);
       if (isRREdited && !v1Params.getReadOnlyClusters().isEmpty()) {
-        applyK8sPlacementFinalization(dbUniverse, v1Params, v1Params.getReadOnlyClusters().get(0));
+        applyK8sPlacementFinalization(
+            savedK8sStsIndices, v1Params, v1Params.getReadOnlyClusters().get(0));
       }
     } else {
       universeCRUDHandler.mergeNodeExporterInfo(dbUniverse, v1Params);
@@ -422,8 +431,51 @@ public class UniverseManagementHandler extends ApiControllerUtils {
             Audit.ActionType.Update,
             Json.toJson(v1Params),
             taskUUID,
-            dbUniverseJson);
+            dbUniverseDetailsJson);
     return new YBATask().resourceUuid(uniUUID).taskUuid(taskUUID);
+  }
+
+  /** Per-AZ Kubernetes statefulset indices as persisted on the universe. */
+  private static class K8sStsIndices {
+    private final int masterStsIndex;
+    private final int tsStsIndex;
+
+    K8sStsIndices(PlacementInfo.PlacementAZ az) {
+      this.masterStsIndex = az.masterStsIndex;
+      this.tsStsIndex = az.tsStsIndex;
+    }
+  }
+
+  /**
+   * Snapshots the server-managed Kubernetes statefulset indices ({@code masterStsIndex} / {@code
+   * tsStsIndex}) of the persisted universe, keyed by cluster UUID and then AZ UUID.
+   *
+   * <p>This must be called before the v2 edit spec is mapped onto {@code
+   * dbUniverse.getUniverseDetails()}: that mapping is done in place (the details object is the
+   * MapStruct {@code @MappingTarget}), so afterwards the "existing" universe object already carries
+   * the requested placement and is no longer a source of truth for these indices.
+   *
+   * @param dbUniverse the existing universe, before any edit-spec mapping is applied
+   */
+  private static Map<UUID, Map<UUID, K8sStsIndices>> captureK8sStsIndices(Universe dbUniverse) {
+    Map<UUID, Map<UUID, K8sStsIndices>> stsIndicesPerCluster = new HashMap<>();
+    for (Cluster dbCluster : dbUniverse.getUniverseDetails().clusters) {
+      // EditKubernetesUniverse compares against cluster.placementInfo, so prefer that; fall back to
+      // the partition-derived placement when it is not set.
+      PlacementInfo dbPlacement =
+          dbCluster.placementInfo != null
+              ? dbCluster.placementInfo
+              : dbCluster.getOverallPlacement();
+      if (dbPlacement == null) {
+        continue;
+      }
+      Map<UUID, K8sStsIndices> stsIndicesPerAz = new HashMap<>();
+      dbPlacement
+          .azStream()
+          .forEach(az -> stsIndicesPerAz.putIfAbsent(az.uuid, new K8sStsIndices(az)));
+      stsIndicesPerCluster.put(dbCluster.uuid, stsIndicesPerAz);
+    }
+    return stsIndicesPerCluster;
   }
 
   /**
@@ -432,23 +484,26 @@ public class UniverseManagementHandler extends ApiControllerUtils {
    * updateCluster()}. This is required because the v2 edit path submits the task directly rather
    * than routing through {@code UniverseCRUDHandler.update()}.
    *
-   * <p>First, the persisted per-AZ statefulset indices are re-hydrated from the existing universe
-   * (see {@link #reconcileK8sStsIndicesFromExisting}). This is required because the v2 API is
-   * spec-based and the placement schema ({@code PlacementAZ.yaml}) does not carry these
-   * server-managed indices; any edit that reconstructs the placement (or partition placements) from
-   * the spec would otherwise reset them to 0 and diverge from the deployed statefulset generation.
+   * <p>First, the persisted per-AZ statefulset indices are re-hydrated from the snapshot taken
+   * before the edit spec was mapped (see {@link #reconcileK8sStsIndicesFromExisting}). This is
+   * required because the v2 API is spec-based and the placement schema ({@code PlacementAZ.yaml})
+   * does not carry these server-managed indices; any edit that reconstructs the placement (or
+   * partition placements) from the spec would otherwise reset them to 0 and diverge from the
+   * deployed statefulset generation.
    *
    * <p>Then {@link PlacementInfoUtil#applyK8sStsIndexIncrement} bumps the per-AZ statefulset index
    * for AZs undergoing a full move (nodes both ToBeAdded and ToBeRemoved), which is the signal
    * {@code EditKubernetesUniverse} uses (via getPodsToAdd/getPodsToRemove) to trigger a full move.
    *
-   * @param dbUniverse the existing universe, source of truth for the current statefulset indices
+   * @param savedK8sStsIndices statefulset indices captured from the universe before edit mapping
    * @param taskParams the configured v1 edit params
    * @param cluster the Kubernetes cluster (primary or read-replica) to finalize
    */
   private void applyK8sPlacementFinalization(
-      Universe dbUniverse, UniverseDefinitionTaskParams taskParams, Cluster cluster) {
-    reconcileK8sStsIndicesFromExisting(dbUniverse, cluster);
+      Map<UUID, Map<UUID, K8sStsIndices>> savedK8sStsIndices,
+      UniverseDefinitionTaskParams taskParams,
+      Cluster cluster) {
+    reconcileK8sStsIndicesFromExisting(savedK8sStsIndices, cluster);
     PlacementInfoUtil.applyK8sStsIndexIncrement(
         cluster, taskParams.getNodesInCluster(cluster.uuid));
   }
@@ -456,7 +511,7 @@ public class UniverseManagementHandler extends ApiControllerUtils {
   /**
    * Restores the server-managed Kubernetes statefulset indices ({@code masterStsIndex} / {@code
    * tsStsIndex}) onto the configured cluster placement (and every partition placement) from the
-   * existing universe, matched by AZ UUID.
+   * snapshot of the existing universe, matched by AZ UUID.
    *
    * <p>These indices are internal bookkeeping that must stay in sync with the physically-deployed
    * statefulsets, and they are deliberately absent from the v2 API schema. Since a v2 edit may
@@ -466,21 +521,16 @@ public class UniverseManagementHandler extends ApiControllerUtils {
    * full moves. AZs absent from the existing placement (newly added) correctly retain the default
    * 0.
    *
-   * @param dbUniverse the existing universe, source of truth for the current statefulset indices
+   * @param savedK8sStsIndices statefulset indices captured from the universe before edit mapping
    * @param cluster the configured cluster whose placement/partitions should be reconciled
    */
-  private void reconcileK8sStsIndicesFromExisting(Universe dbUniverse, Cluster cluster) {
-    Cluster dbCluster = dbUniverse.getUniverseDetails().getClusterByUuid(cluster.uuid);
-    if (dbCluster == null) {
+  private void reconcileK8sStsIndicesFromExisting(
+      Map<UUID, Map<UUID, K8sStsIndices>> savedK8sStsIndices, Cluster cluster) {
+    Map<UUID, K8sStsIndices> dbAzByUuid = savedK8sStsIndices.get(cluster.uuid);
+    if (MapUtils.isEmpty(dbAzByUuid)) {
       // Newly added cluster: there is no prior statefulset generation to preserve.
       return;
     }
-    PlacementInfo dbPlacement = dbCluster.getOverallPlacement();
-    if (dbPlacement == null) {
-      return;
-    }
-    Map<UUID, PlacementInfo.PlacementAZ> dbAzByUuid =
-        dbPlacement.azStream().collect(Collectors.toMap(az -> az.uuid, az -> az, (a, b) -> a));
     if (cluster.placementInfo != null) {
       restoreStsIndices(cluster.placementInfo, dbAzByUuid);
     }
@@ -494,12 +544,12 @@ public class UniverseManagementHandler extends ApiControllerUtils {
   }
 
   private static void restoreStsIndices(
-      PlacementInfo placementInfo, Map<UUID, PlacementInfo.PlacementAZ> dbAzByUuid) {
+      PlacementInfo placementInfo, Map<UUID, K8sStsIndices> dbAzByUuid) {
     placementInfo
         .azStream()
         .forEach(
             az -> {
-              PlacementInfo.PlacementAZ dbAz = dbAzByUuid.get(az.uuid);
+              K8sStsIndices dbAz = dbAzByUuid.get(az.uuid);
               if (dbAz != null) {
                 az.masterStsIndex = dbAz.masterStsIndex;
                 az.tsStsIndex = dbAz.tsStsIndex;
@@ -654,8 +704,7 @@ public class UniverseManagementHandler extends ApiControllerUtils {
       Map<UUID, ImageBundle> imageBundles = new HashMap<>();
       UniverseDefinitionTaskParams universeDetails = universe.getUniverseDetails();
       for (UniverseDefinitionTaskParams.Cluster cluster : universeDetails.clusters) {
-        UUID imageBundleUUID = cluster.userIntent.imageBundleUUID;
-        if (imageBundleUUID != null) {
+        for (UUID imageBundleUUID : cluster.userIntent.getAllImageBundles()) {
           ImageBundle imageBundle = ImageBundle.get(imageBundleUUID);
           if (imageBundle != null && !imageBundles.containsKey(imageBundleUUID)) {
             imageBundles.put(imageBundleUUID, imageBundle);
@@ -663,11 +712,12 @@ public class UniverseManagementHandler extends ApiControllerUtils {
         }
       }
       if (imageBundles.isEmpty()) {
-        UUID providerUUID =
-            UUID.fromString(universeDetails.getPrimaryCluster().userIntent.provider);
-        List<ImageBundle> defaultBundles = ImageBundle.getDefaultForProvider(providerUUID);
-        for (ImageBundle defaultBundle : defaultBundles) {
-          imageBundles.put(defaultBundle.getUuid(), defaultBundle);
+        for (UUID providerUUID :
+            universeDetails.getPrimaryCluster().userIntent.getAllProviderUUIDs()) {
+          List<ImageBundle> defaultBundles = ImageBundle.getDefaultForProvider(providerUUID);
+          for (ImageBundle defaultBundle : defaultBundles) {
+            imageBundles.put(defaultBundle.getUuid(), defaultBundle);
+          }
         }
       }
 
@@ -1184,6 +1234,46 @@ public class UniverseManagementHandler extends ApiControllerUtils {
         universe.getName());
     YBATask ybaTask = new YBATask().taskUuid(taskUuid).resourceUuid(universe.getUniverseUUID());
     return ybaTask;
+  }
+
+  /**
+   * Enables (or disables) cross-cloud federated IAM on an existing universe, retroactively
+   * configuring all current nodes. On enable, prechecks that the universe's provider has federated
+   * IAM enabled with an audience set.
+   */
+  public YBATask manageCrossCloudFederation(
+      Request request, UUID cUUID, UUID uniUUID, UniverseCrossCloudFederationSpec spec) {
+    Customer customer = Customer.getOrBadRequest(cUUID);
+    Universe universe = Universe.getOrBadRequest(uniUUID, customer);
+    boolean enabled = spec != null && Boolean.TRUE.equals(spec.getEnabled());
+    if (enabled) {
+      UniverseDefinitionTaskParams.Cluster primary =
+          universe.getUniverseDetails().getPrimaryCluster();
+      Provider provider =
+          (primary != null && primary.userIntent != null)
+              ? Provider.getOrBadRequest(UUID.fromString(primary.userIntent.provider))
+              : null;
+      if (provider == null
+          || CloudInfoInterface.getCrossCloudFederationAudience(provider) == null) {
+        throw new PlatformServiceException(
+            BAD_REQUEST,
+            "Enable federated IAM and set the audience on this universe's provider before enabling"
+                + " it on the universe.");
+      }
+    }
+    ManageCrossCloudFederationUniverse.Params params =
+        new ManageCrossCloudFederationUniverse.Params();
+    params.setUniverseUUID(uniUUID);
+    params.enabled = enabled;
+    UUID taskUuid = commissioner.submit(TaskType.ManageCrossCloudFederationUniverse, params);
+    CustomerTask.create(
+        customer,
+        uniUUID,
+        taskUuid,
+        CustomerTask.TargetType.Universe,
+        CustomerTask.TaskType.ManageCrossCloudFederation,
+        universe.getName());
+    return new YBATask().taskUuid(taskUuid).resourceUuid(universe.getUniverseUUID());
   }
 
   /**

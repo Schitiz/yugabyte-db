@@ -1023,10 +1023,6 @@ class PgLibPqColocatedTablesWithTablespacesTest : public PgLibPqTest {
     const auto flag = "--ysql_enable_colocated_tables_with_tablespaces=true"s;
     options->extra_master_flags.push_back(flag);
     options->extra_tserver_flags.push_back(flag);
-
-    // TODO(#33534): Fix this test with DDL savepoint and remove below lines.
-    options->extra_master_flags.push_back("--ysql_yb_enable_ddl_savepoint_support=false");
-    options->extra_tserver_flags.push_back("--ysql_yb_enable_ddl_savepoint_support=false");
   }
 };
 
@@ -1659,8 +1655,8 @@ TEST_F_EX(
 void PgLibPqTest::PerformSimultaneousTxnsAndVerifyConflicts(
     const string database_name, bool colocated, const string tablegroup_name,
     const string query_statement) {
-  auto conn1 = ASSERT_RESULT(ConnectToDB(database_name));
-  auto conn2 = ASSERT_RESULT(ConnectToDB(database_name));
+  auto conn1 = ASSERT_RESULT(SetHighPriTxn(ConnectToDB(database_name)));
+  auto conn2 = ASSERT_RESULT(SetLowPriTxn(ConnectToDB(database_name)));
 
   if (colocated) {
     ASSERT_OK(conn1.ExecuteFormat("CREATE TABLE t (a INT, PRIMARY KEY (a ASC))"));

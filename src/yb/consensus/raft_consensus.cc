@@ -222,15 +222,15 @@ DEFINE_NON_RUNTIME_int32(leader_lease_duration_ms, yb::consensus::kDefaultLeader
 
 DEFINE_validator(leader_lease_duration_ms,
     FLAG_DELAYED_COND_VALIDATOR(
-        FLAGS_raft_heartbeat_interval_ms < _value,
+        FINAL_FLAG_VALUE(raft_heartbeat_interval_ms) < _value,
         yb::Format("Must be strictly greater than raft_heartbeat_interval_ms: $0",
-            FLAGS_raft_heartbeat_interval_ms)));
+            FINAL_FLAG_VALUE(raft_heartbeat_interval_ms))));
 
 DEFINE_validator(raft_heartbeat_interval_ms,
     FLAG_DELAYED_COND_VALIDATOR(
-        _value < FLAGS_leader_lease_duration_ms,
+        _value < FINAL_FLAG_VALUE(leader_lease_duration_ms),
         yb::Format("Must be strictly less than leader_lease_duration_ms: $0",
-            FLAGS_leader_lease_duration_ms)));
+            FINAL_FLAG_VALUE(leader_lease_duration_ms))));
 
 DEFINE_UNKNOWN_int32(ht_lease_duration_ms, 2000,
              "Hybrid time leader lease duration. A leader keeps establishing a new lease or "
@@ -3824,7 +3824,12 @@ void RaftConsensus::NonTrackedRoundReplicationFinished(ConsensusRound* round,
   }
   if (!status.ok()) {
     // TODO: Do something with the status on failure?
-    LOG_WITH_PREFIX(INFO) << op_str << " replication failed: " << status << "\n" << GetStackTrace();
+    // Aborted is routine here: rounds are aborted on shutdown and on leader change. Symbolizing a
+    // stack trace can stall the process for minutes under sanitizers, so trace only unexpected
+    // failures, or when verbose logging is requested.
+    const bool with_stack_trace = !status.IsAborted() || VLOG_IS_ON(1);
+    LOG_WITH_PREFIX(INFO) << op_str << " replication failed: " << status
+                          << (with_stack_trace ? "\n" + GetStackTrace() : std::string());
 
     // Clear out the pending state (ENG-590).
     if (IsChangeConfigOperation(op_type) && state_->GetPendingConfigOpIdUnlocked() == round->id()) {

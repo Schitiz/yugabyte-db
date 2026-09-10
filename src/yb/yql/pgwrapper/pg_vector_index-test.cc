@@ -51,11 +51,11 @@
 #include "yb/util/backoff_waiter.h"
 #include "yb/util/countdown_latch.h"
 #include "yb/util/mem_tracker.h"
-#include "yb/util/path_util.h"
 #include "yb/util/status_log.h"
 #include "yb/util/sync_point.h"
 #include "yb/util/test_thread_holder.h"
 
+#include "yb/vector_index/vector_lsm_metadata.h"
 #include "yb/vector_index/distance.h"
 #include "yb/vector_index/usearch_include_wrapper_internal.h"
 #include "yb/vector_index/vector_lsm.h"
@@ -72,6 +72,7 @@ DECLARE_bool(vector_index_no_deletions_skip_filter_check);
 DECLARE_bool(vector_index_skip_filter_check);
 DECLARE_bool(ysql_enable_auto_analyze_infra);
 DECLARE_bool(ysql_enable_auto_analyze);
+DECLARE_bool(ysql_enable_concurrent_ddl);
 DECLARE_bool(ysql_enable_packed_row);
 DECLARE_bool(ysql_use_packed_row_v2);
 DECLARE_bool(TEST_skip_process_apply);
@@ -226,6 +227,9 @@ class PgVectorIndexTestBase : public PgMiniTestBase {
     // serialization, which defaults on in release builds, would make CREATE INDEX wait for that
     // transaction to finish, so disable it to keep behavior consistent across build types.
     ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_object_locking_for_table_locks) = false;
+    // ysql_enable_concurrent_ddl requires enable_object_locking_for_table_locks, so keep the two
+    // consistent instead of leaving a combination that flag validation rejects.
+    ANNOTATE_UNPROTECTED_WRITE(FLAGS_ysql_enable_concurrent_ddl) = false;
 
     PgMiniTestBase::SetUp();
 
@@ -1884,6 +1888,124 @@ template <typename TestClass>
 using PgVectorIndexColocatedPackingTestParamsDecorator =
     PgVectorIndexTestParamsDecoratorBase<TestClass, PgVectorIndexColocatedPackingTestParam>;
 
+// Colocation only; engine and packing stay kUsearch / kNone.
+using PgVectorIndexColocationOnlyParam = bool;
+
+template <>
+struct TestParamTraits<PgVectorIndexColocationOnlyParam> {
+  using ParamType = PgVectorIndexColocationOnlyParam;
+
+  static bool IsColocated(const ParamType& param) {
+    return param;
+  }
+
+  static VectorIndexEngine Engine(const ParamType&) {
+    return VectorIndexEngine::kUsearch;
+  }
+
+  static PackingMode GetPackingMode(const ParamType&) {
+    return PackingMode::kNone;
+  }
+
+  static auto TestParamGenerator() {
+    return testing::Bool();
+  }
+
+  static auto TestParamNameGenerator() {
+    return [](const testing::TestParamInfo<ParamType>& param_info) -> std::string {
+      return param_info.param ? "Colocated" : "Distributed";
+    };
+  }
+};
+
+class PgVectorIndexColocationOnlyTest
+    : public PgVectorIndexTestParamsDecoratorBase<
+          PgVectorIndexTestBase, PgVectorIndexColocationOnlyParam> {};
+
+MAKE_VECTOR_INDEX_PARAM_TEST_SUITE(PgVectorIndexColocationOnlyTest);
+
+// The bootstrap variant of #33276: restoring past the ADD COLUMN that introduced the vector column
+// leaves the tablet heap schema without the column, while the vector index stays registered on the
+// tablet and has lost its chunks (the restored checkpoint predates the index). The next bootstrap
+// launches a backfill for the chunkless index, and the backfill projects the vector column out of
+// the live schema, so DoCreateIndex must skip such an index at tablet open instead of letting the
+// backfill read out of bounds.
+TEST_P(PgVectorIndexColocationOnlyTest, SnapshotScheduleRestoreBeforeVectorColumn) {
+  constexpr size_t kNumRows = 16;
+
+  // The suite's quick-split setup lets the indexed table split before the index exists, and the
+  // restore then reverts to the pre-split parent, which never hosted the index at all.
+  ANNOTATE_UNPROTECTED_WRITE(FLAGS_enable_automatic_tablet_splitting) = false;
+
+  // The read below runs against a table that has no vector index in the catalog, so it is a plain
+  // scan while the tablets may still host the index.
+  ANNOTATE_UNPROTECTED_WRITE(tablet::TEST_fail_on_seq_scan_with_vector_indexes) = false;
+
+  client::SnapshotTestUtil snapshot_util;
+  snapshot_util.SetProxy(&client_->proxy_cache());
+  snapshot_util.SetCluster(cluster_.get());
+
+  // The table starts without the vector column, so MakeTable does not fit here.
+  auto conn = ASSERT_RESULT(PgMiniTestBase::Connect());
+  std::string create_suffix;
+  if (IsColocated()) {
+    create_suffix = " WITH (COLOCATED = 1)";
+    ASSERT_OK(conn.Execute("CREATE DATABASE colocated_db COLOCATION = true"));
+    conn = ASSERT_RESULT(Connect());
+  } else {
+    create_suffix = " SPLIT INTO 1 TABLETS";
+  }
+  ASSERT_OK(conn.Execute("CREATE EXTENSION vector"));
+  ASSERT_OK(conn.ExecuteFormat("CREATE TABLE test (id bigserial PRIMARY KEY)$0", create_suffix));
+
+  // The rows must predate the restore target: they are what the backfill scans after the restore.
+  ASSERT_OK(conn.StartTransaction(IsolationLevel::SNAPSHOT_ISOLATION));
+  for (size_t i = 1; i <= kNumRows; ++i) {
+    ASSERT_OK(conn.ExecuteFormat("INSERT INTO test VALUES ($0)", i));
+  }
+  ASSERT_OK(conn.CommitTransaction());
+
+  auto schedule_id = ASSERT_RESULT(snapshot_util.CreateSchedule(
+      nullptr, YQL_DATABASE_PGSQL, DbName(),
+      client::WaitSnapshot::kTrue, 1s * kTimeMultiplier, 60s * kTimeMultiplier));
+
+  auto hybrid_time = cluster_->mini_master(0)->Now();
+  ASSERT_OK(snapshot_util.WaitScheduleSnapshot(schedule_id, hybrid_time));
+
+  ASSERT_OK(conn.Execute("ALTER TABLE test ADD COLUMN embedding vector(3)"));
+  for (size_t i = 1; i <= kNumRows; ++i) {
+    ASSERT_OK(conn.ExecuteFormat("UPDATE test SET embedding = '[$0, 0, 0]' WHERE id = $0", i));
+  }
+  ASSERT_OK(CreateIndex(conn));
+
+  // The restore drops the index from the catalog, and CleanupHiddenObjects then unregisters it
+  // from the tablets, typically before the restart below gets to bootstrap. The removal is a
+  // replicated ChangeMetadata operation, so blocking the RPC on the master is what keeps the
+  // restarted tserver from replaying it during bootstrap.
+  auto* sync_point = yb::SyncPoint::GetInstance();
+  sync_point->LoadDependency({
+      {"SnapshotScheduleRestoreBeforeVectorColumn::Bootstrapped",
+       "AsyncRemoveTableFromTablet::SendRequest"}});
+  sync_point->EnableProcessing();
+  auto sync_point_cleanup = ScopeExit([sync_point] {
+    sync_point->DisableProcessing();
+    sync_point->ClearTrace();
+  });
+
+  ASSERT_OK(snapshot_util.RestoreSnapshotSchedule(schedule_id, hybrid_time));
+
+  // Bootstrap is what launches backfills for indexes that have no chunks. Restart a tserver that
+  // does not host PG, to keep the connection above usable; the master has a task thread parked on
+  // the sync point above, so it has to stay up.
+  auto* target_ts = cluster_->mini_tablet_server(kPgTsIndex == 0 ? 1 : 0);
+  ASSERT_OK(target_ts->Restart(tserver::WaitTabletsBootstrapped::kTrue));
+  TEST_SYNC_POINT("SnapshotScheduleRestoreBeforeVectorColumn::Bootstrapped");
+
+  ASSERT_EQ(
+      kNumRows,
+      make_unsigned(ASSERT_RESULT(conn.FetchRow<int64_t>("SELECT COUNT(*) FROM test"))));
+}
+
 class PgDistributedVectorIndexTest
     : public PgDistributedVectorIndexTestParamsDecorator<PgVectorIndexTestBase> {
   using Base = PgDistributedVectorIndexTestParamsDecorator<PgVectorIndexTestBase>;
@@ -2021,7 +2143,8 @@ TEST_P(PgDistributedVectorIndexTest, ManualSplitSimple) {
     for (const auto& vi : *indexes) {
       const auto vi_dir = meta->vector_index_dir(vi->options());
       ASSERT_TRUE(env->DirExists(vi_dir));
-      const auto files = AsString(ASSERT_RESULT(path_utils::GetVectorIndexFiles(*env, vi_dir)));
+      const auto files = AsString(
+          ASSERT_RESULT(vector_index::ListVectorLSMFiles(env, vi_dir)).manifest_and_chunk_files);
       if (unsplit_tablet == tablet->tablet_id()) {
         const auto expected_files = Format(
             "[0.meta, vectorindex_1$0]",

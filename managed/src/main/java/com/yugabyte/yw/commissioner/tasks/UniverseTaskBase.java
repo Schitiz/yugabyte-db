@@ -88,6 +88,7 @@ import com.yugabyte.yw.common.backuprestore.BackupUtil;
 import com.yugabyte.yw.common.backuprestore.ybc.YbcBackupNodeRetriever;
 import com.yugabyte.yw.common.backuprestore.ybc.YbcBackupUtil;
 import com.yugabyte.yw.common.backuprestore.ybc.YbcManager;
+import com.yugabyte.yw.common.certmgmt.CertConfigType;
 import com.yugabyte.yw.common.config.CustomerConfKeys;
 import com.yugabyte.yw.common.config.GlobalConfKeys;
 import com.yugabyte.yw.common.config.ProviderConfKeys;
@@ -283,6 +284,7 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
           TaskType.RollbackUpgrade,
           TaskType.RollbackKubernetesUpgrade,
           TaskType.RollbackEditUniverse,
+          TaskType.RollbackEditKubernetesUniverse,
           TaskType.RestartUniverse,
           TaskType.RebootNodeInUniverse,
           TaskType.VMImageUpgrade,
@@ -640,6 +642,12 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
       // 1:1 with EditUniverseRollbackComputer / TaskType.EditUniverse.
       if (lockedTaskType == TaskType.EditUniverse) {
         builder.taskTypes(ImmutableSet.of(TaskType.RollbackEditUniverse));
+      }
+      // 1:1 with EditKubernetesUniverseRollbackComputer / TaskType.EditKubernetesUniverse. Additive
+      // with the rerun path below (EditKubernetesUniverse is rerunnable), so both roll back and
+      // rerun are allowed on a failed K8s edit.
+      if (lockedTaskType == TaskType.EditKubernetesUniverse) {
+        builder.taskTypes(ImmutableSet.of(TaskType.RollbackEditKubernetesUniverse));
       }
       if (RERUNNABLE_PLACEMENT_MODIFICATION_TASKS.contains(lockedTaskType)) {
         builder.rerun(true);
@@ -1562,6 +1570,27 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
     return subTaskGroup;
   }
 
+  protected void createValidateGFlagsTaskInGFlagsUpgrades(
+      List<UniverseDefinitionTaskParams.Cluster> newClusters,
+      String softwareVersion,
+      boolean skipValidation) {
+    if (!isFirstTry()
+        || skipValidation
+        || confGetter.getGlobalConf(GlobalConfKeys.skipRuntimeGflagValidation)) {
+      return;
+    }
+    if (Util.compareYBVersions(
+            softwareVersion, "2024.2.0.0-b1", "2.27.0.0-b1", true /* suppressFormatError */)
+        < 0) {
+      return;
+    }
+    boolean useCLIBinary =
+        Util.compareYBVersions(
+                softwareVersion, "2026.2.0.0-b1", "2.31.0.0-b49", true /* suppressFormatError */)
+            < 0;
+    createValidateGFlagsTask(newClusters, useCLIBinary, softwareVersion);
+  }
+
   /**
    * Creates a subtask that flips {@code state_transition_details.rollbackSafe} to false when the
    * task crosses the rollback checkpoint.
@@ -2453,6 +2482,28 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
                 certificateInfo =
                     certificateInfoRef.updateAndGet(
                         info -> info == null ? universe.getCertificateInfoNodeToNode() : info);
+              }
+              if (certificateInfo != null) {
+                if (provider.getCloudCode() != CloudType.onprem
+                    && certificateInfo.getCertType() == CertConfigType.CustomCertHostPath) {
+                  throw new PlatformServiceException(
+                      BAD_REQUEST,
+                      "CustomCertHostPath type certificate is only supported for onprem provider"
+                          + " for node agent installation. Disable provider runtime config "
+                          + ProviderConfKeys.nodeAgentUseUniverseCertificatesOnInstall.getKey()
+                          + " to not use universe certificates for node agent installation and"
+                          + " retry.");
+                }
+                if (certificateInfo.getCertType() != CertConfigType.CustomCertHostPath
+                    && certificateInfo.getCertType() != CertConfigType.SelfSigned) {
+                  throw new PlatformServiceException(
+                      BAD_REQUEST,
+                      "Only CustomCertHostPath or SelfSigned type certificate is supported for node"
+                          + " agent. Disable provider runtime config "
+                          + ProviderConfKeys.nodeAgentUseUniverseCertificatesOnInstall.getKey()
+                          + " to not use universe certificates for node agent installation and"
+                          + " retry.");
+                }
               }
               params.certificateUuid = certificateInfo == null ? null : certificateInfo.getUuid();
               params.sshUser = imageBundleUtil.findEffectiveSshUser(provider, universe, n);
@@ -4102,7 +4153,8 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
     BackupTableParams backupTableParams = getBackupTableParams(backupRequestParams, tablesToBackup);
     boolean isK8s = Util.isKubernetesBasedUniverse(universe);
 
-    createPreflightValidateBackupTask(backupTableParams, ybcBackup)
+    createPreflightValidateBackupTask(
+            backupTableParams, ybcBackup, forXCluster /* validateStorageConfig */)
         .setSubTaskGroupType(SubTaskGroupType.PreflightChecks)
         .setShouldRunPredicate(predicate);
 
@@ -4516,16 +4568,33 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
   }
 
   public SubTaskGroup createPreflightValidateBackupTask(
-      BackupTableParams backupParams, boolean ybcBackup) {
+      BackupTableParams backupParams, boolean ybcBackup, boolean validateStorageConfig) {
     SubTaskGroup subTaskGroup = createSubTaskGroup("BackupPreflightValidate");
     BackupPreflightValidate task = createTask(BackupPreflightValidate.class);
     BackupPreflightValidate.Params params =
-        new BackupPreflightValidate.Params(backupParams, ybcBackup);
+        new BackupPreflightValidate.Params(backupParams, ybcBackup, validateStorageConfig);
     task.initialize(params);
     task.setUserTaskUUID(getUserTaskUUID());
     subTaskGroup.addSubTask(task);
     getRunnableTask().addSubTaskGroup(subTaskGroup);
     return subTaskGroup;
+  }
+
+  public SubTaskGroup createBackupStorageConfigValidateTask(
+      UUID storageConfigUUID, UUID customerUUID, UUID universeUUID, boolean ybcBackup) {
+    return doInPrecheckSubTaskGroup(
+        "BackupStorageConfigValidate",
+        group -> {
+          BackupStorageConfigValidate task = createTask(BackupStorageConfigValidate.class);
+          BackupStorageConfigValidate.Params params = new BackupStorageConfigValidate.Params();
+          params.storageConfigUUID = storageConfigUUID;
+          params.customerUUID = customerUUID;
+          params.universeUUID = universeUUID;
+          params.ybcBackup = ybcBackup;
+          task.initialize(params);
+          task.setUserTaskUUID(getUserTaskUUID());
+          group.addSubTask(task);
+        });
   }
 
   public SubTaskGroup createPreflightValidateBackupTask(
@@ -4891,15 +4960,31 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
       @Nullable PreInMemoryApplyTask preInMemoryApplyTask) {
     Map<String, String> currentYbcFlagsMap =
         new HashMap<>(universe.getUniverseDetails().getPrimaryCluster().userIntent.ybcFlags);
-    ControllerFlagsSetRequest controllerFlagsSetRequest =
-        ybcManager.prepareFlagsSetRequest(universe, throttleParams, currentYbcFlagsMap);
 
     List<SubTaskGroup> inMemoryGflagsUpgrades = new ArrayList<>();
-    for (Cluster c : universe.getUniverseDetails().clusters) {
-      List<NodeDetails> nodes = universe.getTserversInCluster(c.uuid);
-      inMemoryGflagsUpgrades.add(
-          createSetYbcThrottleParamsInMemory(universe, nodes, controllerFlagsSetRequest));
-    }
+    Util.splitTserversByProviders(universe)
+        .forEach(
+            (providerUUID, nodes) -> {
+              ControllerFlagsSetRequest controllerFlagsSetRequest =
+                  ybcManager.prepareFlagsSetRequest(
+                      universe,
+                      Provider.getOrBadRequest(providerUUID),
+                      nodes,
+                      throttleParams,
+                      currentYbcFlagsMap);
+              for (Cluster c : universe.getUniverseDetails().clusters) {
+                List<NodeDetails> clusterNodes =
+                    nodes.stream()
+                        .filter(n -> n.isInPlacement(c.uuid))
+                        .collect(Collectors.toList());
+                if (!clusterNodes.isEmpty()) {
+                  inMemoryGflagsUpgrades.add(
+                      createSetYbcThrottleParamsInMemory(
+                          universe, clusterNodes, controllerFlagsSetRequest));
+                }
+              }
+            });
+
     // For universe using in-built YBC, run helm upgrade with new ybc gflags
     if (preInMemoryApplyTask != null) {
       preInMemoryApplyTask.runPreApply(universe, currentYbcFlagsMap);

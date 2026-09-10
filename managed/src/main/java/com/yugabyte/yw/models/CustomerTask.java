@@ -201,6 +201,9 @@ public class CustomerTask extends Model {
     @EnumValue("EditKubernetesUniverse")
     EditKubernetesUniverse,
 
+    @EnumValue("RollbackEditKubernetesUniverse")
+    RollbackEditKubernetesUniverse,
+
     @EnumValue("CertsRotate")
     CertsRotate,
 
@@ -430,6 +433,9 @@ public class CustomerTask extends Model {
     @EnumValue("EnableNodeAgent")
     EnableNodeAgent,
 
+    @EnumValue("ManageCrossCloudFederation")
+    ManageCrossCloudFederation,
+
     @EnumValue("Decommission")
     Decommission,
 
@@ -520,6 +526,10 @@ public class CustomerTask extends Model {
           return completed ? "Upgraded Kubernetes Overrides" : "Upgrading Kubernetes Overrides";
         case EditKubernetesUniverse:
           return completed ? "Edited Kubernetes Universe" : "Editing Kubernetes Universe";
+        case RollbackEditKubernetesUniverse:
+          return completed
+              ? "Rolled back edit Kubernetes universe"
+              : "Rolling back edit Kubernetes universe";
         case CertsRotate:
           return completed ? "Updated Certificates" : "Updating Certificates";
         case TlsToggle:
@@ -666,6 +676,10 @@ public class CustomerTask extends Model {
           return completed ? "Restored continuous YBA backup" : "Restoring continuous YBA backup";
         case EnableNodeAgent:
           return completed ? "Enabled node agent on" : "Enabling node agent on";
+        case ManageCrossCloudFederation:
+          return completed
+              ? "Updated cross-cloud federated IAM on"
+              : "Updating cross-cloud federated IAM on";
         case CloneNamespace:
           return completed ? "Cloned Namespace" : "Cloning Namespace";
         case UpdateOOMServiceState:
@@ -1164,8 +1178,25 @@ public class CustomerTask extends Model {
       appendInClause(query, "custom_type_name", filter.getTypeNameList());
     }
 
-    if (filter.getDateRangeStart() != null && filter.getDateRangeEnd() != null) {
-      query.between("create_time", filter.getDateRangeStart(), filter.getDateRangeEnd());
+    // Use entity property paths so Ebean qualifies columns as t0.* - raw "create_time" is
+    // ambiguous once status filtering joins task_info (which also has create_time).
+    // Each bound is independent: omit a side to leave that end open-ended.
+    if (filter.getDateRangeStart() != null) {
+      query.ge("createTime", filter.getDateRangeStart());
+    }
+
+    if (filter.getDateRangeEnd() != null) {
+      query.le("createTime", filter.getDateRangeEnd());
+    }
+
+    // Rows with null completion_time (in-progress) do not match ge/le and are excluded whenever
+    // either completion bound is set.
+    if (filter.getCompletionDateRangeStart() != null) {
+      query.ge("completionTime", filter.getCompletionDateRangeStart());
+    }
+
+    if (filter.getCompletionDateRangeEnd() != null) {
+      query.le("completionTime", filter.getCompletionDateRangeEnd());
     }
 
     if (!CollectionUtils.isEmpty(filter.getStatus())) {

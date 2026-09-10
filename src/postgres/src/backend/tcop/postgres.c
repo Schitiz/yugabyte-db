@@ -91,6 +91,7 @@
 #include "common/pg_yb_conn_mgr_protocol.h"
 #include "executor/spi.h"
 #include "libpq/auth.h"
+#include "libpq/hba.h"
 #include "libpq/yb_pqcomm_extensions.h"
 #include "pg_yb_utils.h"
 #include "replication/walsender_private.h"
@@ -6997,11 +6998,32 @@ PostgresMain(const char *dbname, const char *username)
 
 			ProcessConfigFile(PGC_SIGHUP);
 
-			if (YbIsAuthPassthroughControlBackend() &&
-				yb_conn_mgr_sighup_had_backend_guc_change)
+			if (YbIsAuthPassthroughControlBackend())
 			{
-				yb_conn_mgr_sighup_logical_client_version++;
-				yb_conn_mgr_sighup_had_backend_guc_change = false;
+				/*
+				 * YB: Unlike regular backends, which authenticate exactly once
+				 * right after fork, the Auth Passthrough control backend
+				 * re-authenticates every logical client over its lifetime. It
+				 * must therefore pick up pg_hba.conf / pg_ident.conf changes on
+				 * SIGHUP the same way the postmaster does; otherwise it keeps
+				 * using the stale rules inherited at fork time. Failures are
+				 * logged and the old rules retained (non-fatal) so a malformed
+				 * file does not tear down the pooler's control backend.
+				 */
+				if (!load_hba(NULL /* yb_validate_conf_file */ ))
+					ereport(LOG,
+					/* translator: %s is a configuration file */
+							(errmsg("%s was not reloaded", "pg_hba.conf")));
+
+				if (!load_ident(NULL, NULL /* yb_validate_conf_file */ ))
+					ereport(LOG,
+							(errmsg("%s was not reloaded", "pg_ident.conf")));
+
+				if (yb_conn_mgr_sighup_had_backend_guc_change)
+				{
+					yb_conn_mgr_sighup_logical_client_version++;
+					yb_conn_mgr_sighup_had_backend_guc_change = false;
+				}
 			}
 		}
 
@@ -7153,25 +7175,29 @@ PostgresMain(const char *dbname, const char *username)
 					/* YB: The stmt_name is read here for both 'p' and 'P'. */
 					stmt_name = pq_getmsgstring(&input_message);
 
-					if (yb_parse_type == YB_PARSE_FORCE)
+					/*
+					 * YB: Force and Redeploy parse types don't throw an error
+					 * if prepared statement already exists. Also, ForceParse
+					 * will also drop the prepared statement if invalid
+					 */
+					if (stmt_name[0] != '\0' &&
+						(yb_parse_type == YB_PARSE_FORCE ||
+						 yb_parse_type == YB_PARSE_REDEPLOY))
 					{
-						/*
-						 * YB: If the prepared statement already exists on the backend,
-						 * parsing is a no-op: return YbParseComplete and skip re-parsing.
-						 * Otherwise fall through to (re-)create it and return
-						 * YbParseComplete.
-						 */
+						if (yb_parse_type == YB_PARSE_FORCE)
+						{
+							yb_start_xact_command_internal(false /* yb_skip_read_committed_internal_savepoint */ );
+							YbDropProtoPrepStmtIfInvalid(FetchPreparedStatement(stmt_name, false));
+						}
+
 						if (FetchPreparedStatement(stmt_name, false) != NULL)
 						{
 							if (whereToSendOutput == DestRemote)
-							{
 								yb_send_yb_parse_complete(yb_echo, yb_echo_len);
-								pq_flush();
-							}
 							break;
 						}
 						elog(DEBUG1, "prepared statement \"%s\" does not exist, creating it",
-							stmt_name);
+							 stmt_name);
 					}
 
 					query_string = pq_getmsgstring(&input_message);
@@ -7218,17 +7244,6 @@ PostgresMain(const char *dbname, const char *username)
 													  yb_is_dml_command(query_string),
 													  &need_retry);
 						MemoryContextSwitchTo(errorcontext);
-						/*
-						 * YB: Report parse error with the prepared statement name to connection
-						 * manager. This is done so that connection manager can evict the entry
-						 * from the server hashmap as parse has failed. Conn mgr does not record
-						 * any entry for unnamed prepared statement in it's server hashmap.
-						 */
-						if (YbIsClientYsqlConnMgr() && stmt_name[0] != '\0')
-						{
-							pq_puttextmessage('4', stmt_name);
-							pq_flush();
-						}
 						ThrowErrorData(edata);
 
 					}
@@ -7471,17 +7486,7 @@ PostgresMain(const char *dbname, const char *username)
 					{
 						case 'S':
 							if (close_target[0] != '\0')
-							{
-								if (YbIsClientYsqlConnMgr())
-								{
-									/*
-									 * YB: Start a transaction, if not already done, to allow catalog
-									 * cache lookup in YbIsCachedQueryValid()
-									 */
-									yb_start_xact_command_internal(false /* yb_skip_read_committed_internal_savepoint */ );
-								}
-								DropPreparedStatement(close_target, false, YbIsClientYsqlConnMgr());
-							}
+								DropPreparedStatement(close_target, false);
 							else
 							{
 								/* special-case the unnamed statement */
@@ -7811,10 +7816,12 @@ PostgresMain(const char *dbname, const char *username)
 						 */
 						if (!MyProcPort->yb_has_auth_passthrough_finished)
 						{
+							Oid			database_oid;
+
 							YbLogAuthPassthroughConnAuthenticated(MyProcPort);
 
-							if (YbCreateClientId() == 0)
-								YbAuthPassthroughSetupGUCAndReport();
+							if (YbCreateClientId(&database_oid) == 0)
+								YbAuthPassthroughSetupGUCAndReport(database_oid);
 						}
 
 						MyProcPort->yb_has_auth_passthrough_finished = true;

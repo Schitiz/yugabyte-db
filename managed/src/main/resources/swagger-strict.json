@@ -17,6 +17,14 @@
         "awsHostedZoneName" : {
           "type" : "string"
         },
+        "enableFederatedIam" : {
+          "description" : "Enable GCS-on-AWS cross-cloud federated IAM on this provider's DB nodes (GCP Workload Identity Federation). Requires the federated IAM audience below.",
+          "type" : "boolean"
+        },
+        "federatedIamAudience" : {
+          "description" : "GCP Workload Identity Federation audience (//iam.googleapis.com/projects/.../providers/...), used when federated IAM is enabled. The DB node renders the external_account credential from it.",
+          "type" : "string"
+        },
         "hostVpcId" : {
           "readOnly" : true,
           "type" : "string"
@@ -2185,6 +2193,7 @@
             "UpdateAdditionalServicesState",
             "KubernetesToggleImmutableYbc",
             "OperatorImportUniverse",
+            "ManageCrossCloudFederation",
             "RunScript",
             "CreateFileCollection",
             "DownloadFileCollection",
@@ -2736,6 +2745,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -2883,6 +2893,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -2934,6 +2945,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -4362,6 +4374,10 @@
           "description" : "Cron expression for a recurring backup",
           "type" : "string"
         },
+        "crossCloudFederationAudience" : {
+          "description" : "Cross-cloud federation GCP audience captured at backup time",
+          "type" : "string"
+        },
         "customerUuid" : {
           "description" : "Customer UUID",
           "format" : "uuid",
@@ -5045,7 +5061,8 @@
               "PROMETHEUS",
               "TSERVER_EXPORT",
               "CQL_EXPORT",
-              "YSQL_EXPORT"
+              "YSQL_EXPORT",
+              "KUBERNETES"
             ],
             "type" : "string"
           },
@@ -5753,6 +5770,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -5900,6 +5918,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -5951,6 +5970,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -6249,6 +6269,10 @@
         },
         "cloud" : {
           "description" : "The node's cloud provider",
+          "type" : "string"
+        },
+        "id" : {
+          "description" : "The cloud provider's instance identifier",
           "type" : "string"
         },
         "instance_type" : {
@@ -8978,6 +9002,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -9125,6 +9150,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -9176,6 +9202,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -9821,6 +9848,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -9968,6 +9996,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -10019,6 +10048,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -10490,11 +10520,16 @@
         "imageBundleUuid" : {
           "format" : "uuid",
           "type" : "string"
+        },
+        "providerUuid" : {
+          "format" : "uuid",
+          "type" : "string"
         }
       },
       "required" : [
         "clusterUuid",
-        "imageBundleUuid"
+        "imageBundleUuid",
+        "providerUuid"
       ],
       "type" : "object"
     },
@@ -11371,6 +11406,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -11518,6 +11554,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -11569,6 +11606,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -12127,6 +12165,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -12274,6 +12313,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -12325,6 +12365,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -13141,6 +13182,10 @@
         },
         "cronExpression" : {
           "description" : "Cron expression for a recurring backup",
+          "type" : "string"
+        },
+        "crossCloudFederationAudience" : {
+          "description" : "Cross-cloud federation GCP audience captured at backup time",
           "type" : "string"
         },
         "customerUuid" : {
@@ -14821,9 +14866,17 @@
     },
     "OnPremCloudInfo" : {
       "properties" : {
+        "enableFederatedIam" : {
+          "description" : "WARNING: This is a preview API that could change. Enable GCS-on-AWS cross-cloud federated IAM on this provider's DB nodes (nodes must be AWS VMs).",
+          "type" : "boolean"
+        },
         "enableMultiTenancy" : {
           "description" : "WARNING: This is a preview API that could change.",
           "type" : "boolean"
+        },
+        "federatedIamAudience" : {
+          "description" : "WARNING: This is a preview API that could change. GCP Workload Identity Federation audience used when federated IAM is enabled.",
+          "type" : "string"
         },
         "useClockbound" : {
           "description" : "WARNING: This is a preview API that could change.",
@@ -16186,6 +16239,9 @@
           "format" : "date-time",
           "type" : "string"
         },
+        "local" : {
+          "type" : "boolean"
+        },
         "state" : {
           "enum" : [
             "LEADER",
@@ -16205,6 +16261,7 @@
         "address",
         "instance_state",
         "is_leader",
+        "local",
         "state",
         "uuid",
         "ybaVersion"
@@ -16972,6 +17029,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -17119,6 +17177,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -17170,6 +17229,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -17682,6 +17742,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -17829,6 +17890,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -17880,6 +17942,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -18777,6 +18840,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -18924,6 +18988,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -18975,6 +19040,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -19643,6 +19709,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -19790,6 +19857,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -19841,6 +19909,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -21217,6 +21286,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -21364,6 +21434,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -21415,6 +21486,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -21914,6 +21986,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -22061,6 +22134,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -22112,6 +22186,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -22349,6 +22424,7 @@
               "RestoreYbaBackup",
               "RestoreContinuousBackup",
               "EnableNodeAgentInUniverse",
+              "ManageCrossCloudFederationUniverse",
               "DecommissionNode",
               "CloneNamespace",
               "TlsToggleKubernetes",
@@ -22496,6 +22572,7 @@
               "SetRestoreHiddenState",
               "RestorePreflightValidate",
               "BackupPreflightValidate",
+              "BackupStorageConfigValidate",
               "WaitForLeadersOnPreferredOnly",
               "EnableEncryptionAtRest",
               "DisableEncryptionAtRest",
@@ -22547,6 +22624,7 @@
               "TransferXClusterCerts",
               "CreateTableSpaces",
               "ManageOtelCollector",
+              "ManageCloudFederation",
               "UpdateAndPersistAuditLoggingConfig",
               "UpdateAndPersistQueryLoggingConfig",
               "UpdateAndPersistMetricsExportConfig",
@@ -22938,6 +23016,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -23085,6 +23164,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -23136,6 +23216,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -23740,6 +23821,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -23887,6 +23969,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -23938,6 +24021,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -24492,7 +24576,8 @@
               "PROMETHEUS",
               "TSERVER_EXPORT",
               "CQL_EXPORT",
-              "YSQL_EXPORT"
+              "YSQL_EXPORT",
+              "KUBERNETES"
             ],
             "type" : "string"
           },
@@ -24928,6 +25013,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -25075,6 +25161,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -25126,6 +25213,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -25575,14 +25663,26 @@
     },
     "TaskApiFilter" : {
       "properties" : {
+        "completionDateRangeEnd" : {
+          "description" : "Include tasks completed on or before this time (completion_time). May be set alone or with completion_date_range_start. Tasks with null completion_time (still in progress) are excluded when either completion bound is set.",
+          "example" : "2022-12-12T13:07:18Z",
+          "format" : "date-time",
+          "type" : "string"
+        },
+        "completionDateRangeStart" : {
+          "description" : "Include tasks completed on or after this time (completion_time). May be set alone or with completion_date_range_end. Tasks with null completion_time (still in progress) are excluded when either completion bound is set.",
+          "example" : "2022-12-12T13:07:18Z",
+          "format" : "date-time",
+          "type" : "string"
+        },
         "dateRangeEnd" : {
-          "description" : "The end date to filter paged query.",
+          "description" : "Include tasks created on or before this time (create_time). May be set alone or with date_range_start.",
           "example" : "2022-12-12T13:07:18Z",
           "format" : "date-time",
           "type" : "string"
         },
         "dateRangeStart" : {
-          "description" : "The start date to filter paged query.",
+          "description" : "Include tasks created on or after this time (create_time). May be set alone or with date_range_end.",
           "example" : "2022-12-12T13:07:18Z",
           "format" : "date-time",
           "type" : "string"
@@ -25736,6 +25836,7 @@
               "RestoreYbaBackup",
               "RestoreContinuousBackup",
               "EnableNodeAgent",
+              "ManageCrossCloudFederation",
               "Decommission",
               "CloneNamespace",
               "UpdateOOMServiceState",
@@ -26292,6 +26393,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -26439,6 +26541,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -26490,6 +26593,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -27001,6 +27105,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -27148,6 +27253,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -27199,6 +27305,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -27856,6 +27963,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -28003,6 +28111,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -28054,6 +28163,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -28530,6 +28640,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -28677,6 +28788,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -28728,6 +28840,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -29204,6 +29317,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -29351,6 +29465,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -29402,6 +29517,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -30399,6 +30515,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -30546,6 +30663,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -30597,6 +30715,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -31570,6 +31689,7 @@
             "RestoreYbaBackup",
             "RestoreContinuousBackup",
             "EnableNodeAgentInUniverse",
+            "ManageCrossCloudFederationUniverse",
             "DecommissionNode",
             "CloneNamespace",
             "TlsToggleKubernetes",
@@ -31717,6 +31837,7 @@
             "SetRestoreHiddenState",
             "RestorePreflightValidate",
             "BackupPreflightValidate",
+            "BackupStorageConfigValidate",
             "WaitForLeadersOnPreferredOnly",
             "EnableEncryptionAtRest",
             "DisableEncryptionAtRest",
@@ -31768,6 +31889,7 @@
             "TransferXClusterCerts",
             "CreateTableSpaces",
             "ManageOtelCollector",
+            "ManageCloudFederation",
             "UpdateAndPersistAuditLoggingConfig",
             "UpdateAndPersistQueryLoggingConfig",
             "UpdateAndPersistMetricsExportConfig",
@@ -31999,7 +32121,6 @@
       "description" : "xcluster config object",
       "properties" : {
         "automaticDdlMode" : {
-          "readOnly" : true,
           "type" : "boolean"
         },
         "createTime" : {
@@ -32295,7 +32416,6 @@
       "description" : "xcluster get response",
       "properties" : {
         "automaticDdlMode" : {
-          "readOnly" : true,
           "type" : "boolean"
         },
         "createTime" : {

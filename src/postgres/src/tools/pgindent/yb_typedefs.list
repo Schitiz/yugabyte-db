@@ -81,6 +81,7 @@ YbDdlTransactionState
 YbDefaultSysScan
 YbDefaultSysScanData
 YbDetailSorter
+YbDocdbOidToRelidEntry
 YbDoubleCounters
 YbDropProfileStmt
 YbEndFn_t
@@ -193,6 +194,7 @@ YbRange
 YbReCacheInfo
 YbRegisterOuterMatchFn_t
 YbRelationAttrsProcessingState
+YbRemovedAclKind
 YbResetBatchFn_t
 YbRowBounds
 YbRunWithPrefetcherContext
@@ -254,6 +256,7 @@ YbVirtualWalRecord
 YbcAdvisoryLockId
 YbcAdvisoryLockMode
 YbcAshAcquireBufferLock
+YbcAshAuxKind
 YbcAshConstQueryIdType
 YbcAshGetNextCircularBufferSlot
 YbcAshMetadata

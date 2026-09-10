@@ -84,12 +84,14 @@ DECLARE_double(leader_failure_max_missed_heartbeat_periods);
 DEFINE_RUNTIME_int32(follower_unavailable_considered_failed_sec, 900,
              "Seconds that a leader is unable to successfully heartbeat to a "
              "follower after which the follower is considered to be failed and "
-             "evicted from the config.");
+             "evicted from the config. This value should match "
+             "log_min_seconds_to_retain.");
 TAG_FLAG(follower_unavailable_considered_failed_sec, advanced);
 DEFINE_validator(follower_unavailable_considered_failed_sec,
   FLAG_DELAYED_COND_VALIDATOR(
-      _value >= FLAGS_raft_heartbeat_interval_ms *
-                static_cast<double>(FLAGS_leader_failure_max_missed_heartbeat_periods) / 1000,
+      _value >= FINAL_FLAG_VALUE(raft_heartbeat_interval_ms) *
+                static_cast<double>(FINAL_FLAG_VALUE(leader_failure_max_missed_heartbeat_periods)) /
+                    1000,
       yb::Format("Must be >= ($0 * $1) / 1000",
                  "raft_heartbeat_interval_ms", "leader_failure_max_missed_heartbeat_periods")));
 

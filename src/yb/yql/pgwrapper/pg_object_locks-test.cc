@@ -376,28 +376,27 @@ TEST_F(PgObjectLocksTestRF1, TestPgLocksBlockedByMultipleTransactions) {
         " (ybdetails->'blocked_by')::text AS blocked_by FROM pg_locks"
         " WHERE relation = 'test'::regclass AND locktype = 'relation' ORDER BY granted, mode"));
     LOG(INFO) << "object locks on test:\n" << dump;
-    blocked_by = VERIFY_RESULT(observer_conn.FetchRow<std::string>(
-        "SELECT COALESCE("
-        "  (SELECT ybdetails->'blocked_by' FROM pg_locks"
-        "     WHERE NOT granted AND relation = 'test'::regclass AND locktype = 'relation'"
-        "       AND mode = 'AccessExclusiveLock'"
-        "       AND ybdetails->'blocked_by' IS NOT NULL"
-        "     LIMIT 1), '[]'::jsonb)::text"));
     // Require at least two blocker txn ids, both matching the granted RowExclusiveLock holders.
-    return VERIFY_RESULT(observer_conn.FetchRow<bool>(
-        "SELECT EXISTS ("
-        "  SELECT 1 FROM pg_locks w"
-        "  WHERE NOT w.granted AND w.relation = 'test'::regclass AND w.locktype = 'relation'"
-        "    AND w.mode = 'AccessExclusiveLock'"
-        "    AND w.ybdetails->'blocked_by' IS NOT NULL"
-        "    AND jsonb_array_length(w.ybdetails->'blocked_by') >= 2"
-        "    AND (SELECT count(DISTINCT g.ybdetails->>'transactionid')"
-        "         FROM pg_locks g"
-        "         WHERE g.granted AND g.relation = 'test'::regclass AND g.locktype = 'relation'"
-        "           AND g.mode = 'RowExclusiveLock'"
-        "           AND g.ybdetails->>'transactionid' IS NOT NULL"
-        "           AND w.ybdetails->'blocked_by' @> to_jsonb(g.ybdetails->>'transactionid')"
-        "        ) >= 2)"));
+    // The check and the blocked_by value must come from one query: separate round trips see
+    // different pg_locks snapshots, so the value could still be empty on the iteration where
+    // the check first passes. MATERIALIZED keeps the correlated subquery on the same snapshot.
+    blocked_by = VERIFY_RESULT(observer_conn.FetchRow<std::string>(
+        "WITH locks AS MATERIALIZED ("
+        "  SELECT granted, mode, ybdetails FROM pg_locks"
+        "  WHERE relation = 'test'::regclass AND locktype = 'relation')"
+        "SELECT COALESCE("
+        "  (SELECT w.ybdetails->'blocked_by' FROM locks w"
+        "   WHERE NOT w.granted AND w.mode = 'AccessExclusiveLock'"
+        "     AND w.ybdetails->'blocked_by' IS NOT NULL"
+        "     AND jsonb_array_length(w.ybdetails->'blocked_by') >= 2"
+        "     AND (SELECT count(DISTINCT g.ybdetails->>'transactionid')"
+        "          FROM locks g"
+        "          WHERE g.granted AND g.mode = 'RowExclusiveLock'"
+        "            AND g.ybdetails->>'transactionid' IS NOT NULL"
+        "            AND w.ybdetails->'blocked_by' @> to_jsonb(g.ybdetails->>'transactionid')"
+        "         ) >= 2"
+        "   LIMIT 1), '[]'::jsonb)::text"));
+    return blocked_by != "[]" && !blocked_by.empty();
   }, 30s * kTimeMultiplier,
      "Timed out waiting for blocked_by to list multiple blocking transactions"));
 
@@ -1490,8 +1489,11 @@ TEST_F(PgObjectLocksTest, TestPgLocksBlockedByForObjectLocksMultiNode) {
     return waiter_conn.Execute("ALTER TABLE test ADD COLUMN v1 INT");
   });
 
-  // Poll pg_locks from the observer (ts2) until the waiting object lock reports a blocker.
+  // Poll pg_locks from the observer (ts2) until the waiting object lock reports a blocker that is
+  // also visible as a granted holder. Both facts come from independent nodes, so the waiter can
+  // show up first.
   std::string blocked_by;
+  bool references_blocker = false;
   ASSERT_OK(WaitFor([&]() -> Result<bool> {
     const auto dump = VERIFY_RESULT(observer_conn.FetchAllAsString(
         "SELECT granted, mode, ybdetails->>'transactionid' AS txn,"
@@ -1504,18 +1506,19 @@ TEST_F(PgObjectLocksTest, TestPgLocksBlockedByForObjectLocksMultiNode) {
         "     WHERE NOT granted AND relation = 'test'::regclass AND locktype = 'relation'"
         "       AND ybdetails->'blocked_by' IS NOT NULL"
         "     LIMIT 1), '[]'::jsonb)::text"));
-    return blocked_by != "[]" && !blocked_by.empty();
-  }, 60s * kTimeMultiplier, "Timed out waiting for blocked_by to be populated across nodes"));
+    if (blocked_by == "[]" || blocked_by.empty()) {
+      return false;
+    }
+    references_blocker = VERIFY_RESULT(observer_conn.FetchRow<bool>(
+        "SELECT EXISTS ("
+        "  SELECT 1 FROM pg_locks w JOIN pg_locks g"
+        "    ON g.granted AND g.relation = 'test'::regclass AND g.locktype = 'relation'"
+        "       AND g.ybdetails->>'transactionid' IS NOT NULL"
+        "  WHERE NOT w.granted AND w.relation = 'test'::regclass AND w.locktype = 'relation'"
+        "    AND w.ybdetails->'blocked_by' @> to_jsonb(g.ybdetails->>'transactionid'))"));
+    return references_blocker;
+  }, 60s * kTimeMultiplier, "Timed out waiting for blocked_by to reference the granted holder"));
 
-  // The blocked_by list should reference the blocker's transaction, which also shows up as a
-  // granted object lock holder on the same table.
-  const auto references_blocker = ASSERT_RESULT(observer_conn.FetchRow<bool>(
-      "SELECT EXISTS ("
-      "  SELECT 1 FROM pg_locks w JOIN pg_locks g"
-      "    ON g.granted AND g.relation = 'test'::regclass AND g.locktype = 'relation'"
-      "       AND g.ybdetails->>'transactionid' IS NOT NULL"
-      "  WHERE NOT w.granted AND w.relation = 'test'::regclass AND w.locktype = 'relation'"
-      "    AND w.ybdetails->'blocked_by' @> to_jsonb(g.ybdetails->>'transactionid'))"));
   EXPECT_TRUE(references_blocker)
       << "blocked_by did not reference the granted holder; blocked_by=" << blocked_by;
 
@@ -1538,6 +1541,10 @@ class PgObjecLocksTestOutOfOrderMessageHandling
         yb::Format("--pg_client_extra_timeout_ms=$0", kPgClientExtraTimeoutMs));
     opts->extra_tserver_flags.emplace_back(
         yb::Format("--vmodule=ts_local_lock_manager=2,$0", FLAGS_vmodule));
+    // TODO(#33361): the UseDdlForLocks variants fail with concurrent DDL enabled. Disable it
+    // until the test is fixed to work in that mode.
+    opts->extra_tserver_flags.emplace_back("--ysql_enable_concurrent_ddl=false");
+    AppendFlagToAllowedPreviewFlagsCsv(opts->extra_tserver_flags, "ysql_enable_concurrent_ddl");
   }
 
   DoMasterFailover ShouldDoMasterFailover() const {

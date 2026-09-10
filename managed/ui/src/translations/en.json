@@ -2302,6 +2302,7 @@
       "deleteNodeAgent": "Unregister Node Agent",
       "confirmDeletionMessage": "Are you sure you want to unregister the node agent associated with the node {{nodeName}}?",
       "errorStatusFilterCheckbox": "Show only agents with error status",
+      "certificateColumn": "Certificate",
       "runtimeConfig": {
         "nodeAgentClientEnabledWarning": "Disabling this runtime configuration will prevent you from upgrading YugabyteDB Anywhere to future major versions."
       },
@@ -2309,6 +2310,10 @@
         "install": {
           "label": "Reinstall node agent",
           "onPremManuallyProvisionedTooltip": "Reinstalling via YugabyteDB Anywhere is not available for manually provisioned on-prem nodes. Please reinstall the node agent manually."
+        },
+        "update": {
+          "label": "Update node agent certificate",
+          "onPremManuallyProvisionedTooltip": "Updating via YugabyteDB Anywhere is not available for manually provisioned on-prem nodes. Please update the node agent manually."
         },
         "delete": {
           "label": "Unregister node agent"
@@ -2365,6 +2370,30 @@
         "success": {
           "requestSuccess": "Node agent installation started.",
           "taskSuccess": "Installed node agent."
+        }
+      },
+      "updateNodeAgentModal": {
+        "title": "Update Node Agent Certificate",
+        "prerequisitesInfo": "Ensure that the selected nodes in {{universeName}} satisfy the <nodeAgentPrereqDocsLink>prerequisites</nodeAgentPrereqDocsLink>.",
+        "beforeYouStart": "Before you start",
+        "updateNodeAgentFor": "Update node agent certificate for:",
+        "allNodeInUniverse": "All nodes in this Universe",
+        "selectedNode": "Selected node",
+        "specificSelectedNode": "Selected node ({{nodeName}})",
+        "certificateLabel": "Certificate",
+        "certificatePlaceholder": "Select a certificate",
+        "certificateOption": {
+          "existing": "Use generated certificates",
+          "custom": "Use custom certificate"
+        },
+        "confirmButton": "Update Node Agent Certificate",
+        "error": {
+          "requestFailureLabel": "Update node agent certificate request failed",
+          "taskFailure": "Failed to update node agent certificate."
+        },
+        "success": {
+          "requestSuccess": "Node agent certificate update started.",
+          "taskSuccess": "Updated node agent certificate."
         }
       }
     },
@@ -3883,10 +3912,10 @@
         "title": "General Settings",
         "universeName": "Universe Name",
         "universeNamePlaceholder": "Enter Universe Name",
-        "cloudProvider": "Provider",
-        "providerconfiguration": "Provider Configuration",
+        "cloudProvider": "Infrastructure Provider",
+        "providerconfiguration": "Infrastructure Provider Config",
         "providerConfigurationPlaceholder": "Select Provider Configuration",
-        "providerEmptyState": "You don't have an {{providerCode}} provider configuration yet .<a /><a />To continue, create a provider configuration in <b>Admin → Advanced → Provider Configuration</b>. You may need admin privileges to complete this step.",
+        "providerEmptyState": "You don't have an {{providerCode}} provider configuration yet .<a /><a />To continue, create a provider configuration in <b>Integrations → Infrastructure</b>. You may need admin privileges to complete this step.",
         "providerTooltip": "A reusable configuration that defines the infrastructure and allowed deployment scope (cloud, regions, networking, and credentials) for Universes.",
         "databaseVersion": "Database Version",
         "databaseVersionPlaceholder": "Select Database Version",
@@ -4451,6 +4480,8 @@
         "clusterId": "Cluster ID",
         "provider": "Provider",
         "providerConfig": "Provider Config",
+        "infrastructureProvider": "Infrastructure Provider",
+        "providerConfiguration": "Infrastructure Provider Config",
         "totalNodes": "Total Nodes",
         "totalPods": "Total Pods",
         "node": "node",
@@ -4470,6 +4501,12 @@
         "cpuArch": "CPU Architecture",
         "linuxVersion": "Linux Version",
         "defaultInstanceType": "Default Instance Type",
+        "instanceType": "Instance Type",
+        "regionsAndPlacement": "Regions and Placement",
+        "hardware": "Hardware",
+        "viewMorePlacement": "View more in Placement page",
+        "viewMoreHardware": "View more in Hardware page",
+        "sameAsPrimaryCluster": "Same as Primary Cluster",
         "region": "Region",
         "az": "AZ",
         "primary": "Primary",
@@ -4514,13 +4551,13 @@
         "noPlacementChanges": "Nothing to update - no placement fields changed.",
         "editPlacementConfirmModal": {
           "title": "Review Changes",
-          "summary": "Summary of instance configuration changes:",
+          "summary": "Summary of placement changes:",
           "current": "Current",
           "new": "New",
-          "faultTolerance": "Fault Tolerance:",
-          "replicationFactor": "Replication Factor:",
-          "totalNodes": "Total Nodes:",
-          "totalPods": "Total Pods:",
+          "faultTolerance": "Resilience :",
+          "replicationFactor": "Replication Factor :",
+          "totalNodes": "Total Nodes :",
+          "totalPods": "Total Pods :",
           "node": "node",
           "pod": "pod",
           "rank": "Rank {{rank}}",
@@ -4559,7 +4596,9 @@
         "memory": "Memory",
         "memoryValue": "{{memory}} GiB",
         "storageClass": "Storage class",
-        "ebsType": "ebs type",
+        "ebsType": "EBS Type",
+        "ssdType": "SSD Type",
+        "storageType": "Storage type",
         "iops": "provisioned IOPS / Node",
         "iopsPod": "provisioned IOPS / Pod",
         "throughput": "provisioned throughput / Node",
@@ -4596,7 +4635,7 @@
           "fasterAndRecommended": "Faster and Recommended",
           "rollingRestartDescription": "No data migration is required. The universe will remain online and available throughout.",
           "rollingRestartRf1Warning": "<strong>Note!</strong> The universe won’t be available for reads and writes during the restart.",
-          "fullMoveInfo": "<strong>Note!</strong> This operation will migrate all data to a new set of nodes with new IP addresses. The universe will remain online and accessible throughout.",
+          "fullMoveInfo": "<strong>Note!</strong> This operation will migrate all data to <strong>a new set of nodes</strong> with new IP addresses. The universe will remain online and accessible throughout.",
           "nonRestartInfo": "<strong>Note!</strong> This operation will resize the current nodes without requiring a restart.",
           "delayBetweenNodes": "Delay between nodes:",
           "seconds": "seconds",
@@ -5145,7 +5184,8 @@
         "nowPlacement": "Placement",
         "nowHardware": "Hardware",
         "nowLogs": "Logs",
-        "nowTelemetryExport": "Telemetry Export"
+        "nowTelemetryExport": "Telemetry Export",
+        "readReplica": "Read Replica"
       },
       "whereThingsMovedModal": {
         "title": "Where Things Moved",
@@ -5164,6 +5204,7 @@
         "nowHardwareDetail": "(Instance settings)",
         "nowLogs": "Logs",
         "nowTelemetryExport": "Telemetry Export",
+        "readReplica": "Read Replica",
         "close": "Close",
         "findOutMore": "Find Out More"
       },

@@ -1804,6 +1804,7 @@ public class NodeManager extends DevopsBase {
           Common.CloudType cloudType = provider.getCloudCode();
           if (!cloudType.equals(Common.CloudType.onprem)) {
             addInstanceTypeArgs(commandArgs, provider.getUuid(), taskParam.instanceType, false);
+            addOciFlexShapeConfigArgs(commandArgs, provider, taskParam.instanceType);
             if (taskParam.capacityReservation != null) {
               commandArgs.add("--capacity_reservation");
               commandArgs.add(taskParam.capacityReservation);
@@ -2354,6 +2355,7 @@ public class NodeManager extends DevopsBase {
           }
           ChangeInstanceType.Params taskParam = (ChangeInstanceType.Params) nodeTaskParam;
           addInstanceTypeArgs(commandArgs, provider.getUuid(), taskParam.instanceType, false);
+          addOciFlexShapeConfigArgs(commandArgs, provider, taskParam.instanceType);
 
           if (!taskParam.skipAnsiblePlaybookForCGroup) {
             commandArgs.add("--pg_max_mem_mb");
@@ -2707,6 +2709,32 @@ public class NodeManager extends DevopsBase {
     }
   }
 
+  // OCI Flex shapes require shapeConfig.ocpus on launch and UpdateInstance.
+  private void addOciFlexShapeConfigArgs(
+      List<String> commandArgs, Provider provider, String instanceTypeCode) {
+    if (provider.getCloudCode() != Common.CloudType.oci
+        || StringUtils.isBlank(instanceTypeCode)
+        || !instanceTypeCode.contains("Flex")) {
+      return;
+    }
+    InstanceType instanceType = InstanceType.get(provider.getUuid(), instanceTypeCode);
+    if (instanceType == null) {
+      log.warn(
+          "Skipping OCI Flex shapeConfig args; instance type {} not found for provider {}",
+          instanceTypeCode,
+          provider.getUuid());
+      return;
+    }
+    if (instanceType.getNumCores() != null) {
+      commandArgs.add("--ocpus");
+      commandArgs.add(String.valueOf(instanceType.getNumCores()));
+    }
+    if (instanceType.getMemSizeGB() != null) {
+      commandArgs.add("--memory_in_gbs");
+      commandArgs.add(String.valueOf(instanceType.getMemSizeGB()));
+    }
+  }
+
   private boolean isLowMemInstanceType(String instanceType) {
     List<String> lowMemInstanceTypePrefixes = ImmutableList.of("t2.", "t3.");
     String instanceTypePrefix = instanceType.split("\\.")[0] + ".";
@@ -2968,6 +2996,7 @@ public class NodeManager extends DevopsBase {
         || type == NodeCommandType.Create_Root_Volumes
         || type == NodeCommandType.RunHooks
         || type == NodeCommandType.Verify_Certs
-        || type == NodeCommandType.Wait_For_Connection;
+        || type == NodeCommandType.Wait_For_Connection
+        || type == NodeCommandType.Hard_Reboot;
   }
 }
