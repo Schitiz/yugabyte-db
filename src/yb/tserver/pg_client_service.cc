@@ -892,6 +892,10 @@ class OpenTableQuery : public OpenTableQueryBase<PgOpenTableRequestPB, PgOpenTab
   }
 };
 
+[[nodiscard]] bool IsPIDExists(pid_t pid) {
+  return !(getsid(pid) == -1 && errno == ESRCH);
+}
+
 }  // namespace
 
 class PgClientServiceImpl::Impl : public SessionProvider, public SessionRegistryContext {
@@ -1032,31 +1036,28 @@ class PgClientServiceImpl::Impl : public SessionProvider, public SessionRegistry
       }
     }
 
-    context->ListenConnectionShutdown([this, session_id, pid = req.pid()]() {
-#if defined(__APPLE__)
-      auto delay = 250ms;
-#else
-      auto delay = RegularBuildVsSanitizers(50ms, 1000ms);
-#endif
-      messenger_.scheduler().Schedule([this, session_id, pid](const Status& status) {
-        if (!status.ok()) {
-          // Task was aborted.
-          return;
-        }
-        CheckSessionShutdown(pid, session_id);
-        // Give some time for process to exit after connection shutdown.
-      }, delay);
+    context->ListenConnectionShutdown([this, session_id, pid = req.pid()] {
+      constexpr auto kCheckTimeout = 1000ms;
+      ScheduleCheckSessionShutdown(pid, session_id, CoarseMonoClock::Now() + kCheckTimeout);
     });
 
     return session_registry_.Insert(std::move(session_info));
   }
 
-  void CheckSessionShutdown(pid_t pid, int64_t session_id) {
-    auto sid = getsid(pid);
-    if (sid != -1 || errno != ESRCH) {
-      return;
+  void ScheduleCheckSessionShutdown(pid_t pid, int64_t session_id, CoarseTimePoint deadline) {
+    messenger_.scheduler().Schedule([this, session_id, pid, deadline](const Status& status) {
+      if (status.ok()) {
+        CheckSessionShutdown(pid, session_id, deadline);
+      }
+    }, RegularBuildVsSanitizers(50ms, 500ms));
+  }
+
+  void CheckSessionShutdown(pid_t pid, int64_t session_id, CoarseTimePoint deadline) {
+    if (!IsPIDExists(pid)) {
+      session_registry_.Expire(session_id);
+    } else if (deadline > CoarseMonoClock::Now()) {
+      ScheduleCheckSessionShutdown(pid, session_id, deadline);
     }
-    session_registry_.Expire(session_id);
   }
 
   void OpenTable(
@@ -1543,9 +1544,13 @@ class PgClientServiceImpl::Impl : public SessionProvider, public SessionRegistry
 
       std::visit([&](auto&& old_txns_resp) {
         if (old_txns_resp->has_error()) {
-          // Ignore leadership and NOT_FOUND errors as we broadcast the request to all tservers.
-          if (old_txns_resp->error().code() == TabletServerErrorPB::NOT_THE_LEADER ||
-              old_txns_resp->error().code() == TabletServerErrorPB::TABLET_NOT_FOUND) {
+          // The request is broadcast to all tservers, so ignore errors meaning only that this node
+          // cannot serve the status tablet. The status_tablet_ids check below still fails the query
+          // if no node answered for some status tablet.
+          const auto error_code = old_txns_resp->error().code();
+          if (error_code == TabletServerErrorPB::NOT_THE_LEADER ||
+              error_code == TabletServerErrorPB::TABLET_NOT_FOUND ||
+              error_code == TabletServerErrorPB::TABLET_NOT_RUNNING) {
             return;
           }
           const auto& s = StatusFromPB(old_txns_resp->error().status());
