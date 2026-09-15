@@ -101,6 +101,7 @@
 #include "yb/server/server_base.proxy.h"
 
 #include "yb/tools/tools_utils.h"
+#include "yb/tools/xcluster_verify.h"
 
 #include "yb/tserver/tserver_service.proxy.h"
 
@@ -1475,7 +1476,9 @@ Status ClusterAdminClient::ListAllMasters() {
   cout << RightPadToUuidWidth("Master UUID") << kColumnSep
         << RightPadToWidth(kRpcHostPortHeading, kHostPortColWidth) << kColumnSep
         << RightPadToWidth("State", kSmallColWidth) << kColumnSep
-        << "Role" << kColumnSep << RightPadToWidth(kBroadcastHeading, kHostPortColWidth) << endl;
+        << RightPadToWidth("Role", kSmallColWidth) << kColumnSep
+        << RightPadToWidth(kBroadcastHeading, kHostPortColWidth)
+        << kColumnSep << "Lag(ms)" << endl;
 
   for (const auto& master : lresp.masters()) {
       const auto master_reg = master.has_registration() ? &master.registration() : nullptr;
@@ -1489,10 +1492,19 @@ Status ClusterAdminClient::ListAllMasters() {
                                 PBEnumToString(master.error().code()) : "ALIVE"),
                               kSmallColWidth)
             << kColumnSep;
-      cout << (master.has_role() ? PBEnumToString(master.role()) : "UNKNOWN") << kColumnSep;
+      cout << RightPadToWidth(
+                master.has_role() ? PBEnumToString(master.role()) : "UNKNOWN",
+                kSmallColWidth)
+            << kColumnSep;
       cout << RightPadToWidth(
         master_reg ? FormatFirstHostPort(master_reg->broadcast_addresses()) : "UNKNOWN",
-        kHostPortColWidth) << endl;
+        kHostPortColWidth) << kColumnSep;
+      if (master.has_heartbeat_delay_ms()) {
+        cout << master.heartbeat_delay_ms();
+      } else {
+        cout << "N/A";
+      }
+      cout << endl;
   }
 
   return Status::OK();
@@ -5257,6 +5269,16 @@ Status ClusterAdminClient::GetTableXorHash(
     std::cout << "Next key: " << strings::b2a_hex(totals.next_key) << std::endl;
   }
   return Status::OK();
+}
+
+Result<SchemaFingerprint> ClusterAdminClient::GetSchemaFingerprint(const TableId& table_id) {
+  auto info = VERIFY_RESULT(yb_client_->GetYBTableInfoById(table_id, /* include_hidden = */ false));
+  // A catalog schema always carries column ids, so rejecting one here means the
+  // master returned something malformed. Prepended because its message names no table, and the
+  // table is what an operator needs to act on it.
+  return VERIFY_RESULT_PREPEND(
+      BuildSchemaFingerprint(info.schema),
+      Format("Cannot fingerprint schema of table $0", table_id));
 }
 
 Status ClusterAdminClient::AreNodesSafeToTakeDown(

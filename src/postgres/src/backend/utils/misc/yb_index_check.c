@@ -43,6 +43,7 @@
 #include "executor/ybModifyTable.h"
 #include "fmgr.h"
 #include "funcapi.h"
+#include "miscadmin.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "pg_yb_utils.h"
@@ -1298,6 +1299,21 @@ get_expected_index_rowcount(Relation baserel, Relation indexrel)
 		appendStringInfo(&querybuf, " WHERE %s", indpred_clause);
 	}
 
+	/*
+	 * This ensures that the query observes every base relation row irrespective
+	 * of row-level security, matching the scan path. Run the count as the base
+	 * relation's owner with SECURITY_NOFORCE_RLS so that row-level security is
+	 * bypassed, matching the scan path. This mirrors how referential-integrity
+	 * checks run (see ri_triggers.c).
+	 */
+	Oid			save_userid;
+	int			save_sec_context;
+
+	GetUserIdAndSecContext(&save_userid, &save_sec_context);
+	SetUserIdAndSecContext(baserel->rd_rel->relowner,
+						   save_sec_context | SECURITY_LOCAL_USERID_CHANGE |
+						   SECURITY_NOFORCE_RLS);
+
 	if (SPI_connect() != SPI_OK_CONNECT)
 		elog(ERROR, "SPI_connect failed");
 
@@ -1316,6 +1332,9 @@ get_expected_index_rowcount(Relation baserel, Relation indexrel)
 
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish failed");
+
+	/* Restore the caller's user id and security context. */
+	SetUserIdAndSecContext(save_userid, save_sec_context);
 
 	pfree(querybuf.data);
 	return expected_rowcount;
@@ -1611,7 +1630,7 @@ make_bnl_plan(Plan *lefttree, Plan *righttree, Var *join_clause_lhs,
 	join_plan->nl.join.inner_unique = true;
 	join_plan->nl.join.joinqual = list_make1(join_clause);
 	join_plan->nl.nestParams = list_make1(nlp);
-	join_plan->first_batch_factor = 1.0;
+	join_plan->first_batch_size = 0;
 	join_plan->num_hashClauseInfos = 1;
 	join_plan->hashClauseInfos = palloc0(sizeof(YbBNLHashClauseInfo));
 	join_plan->hashClauseInfos->hashOp = ByteaEqualOperator;
