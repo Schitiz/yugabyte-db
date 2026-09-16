@@ -2289,6 +2289,24 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
       boolean deleteNode,
       boolean deleteRootVolumes,
       boolean skipDestroyPrecheck) {
+    return createDestroyServerTasks(
+        universe,
+        nodes,
+        isForceDelete,
+        deleteNode,
+        deleteRootVolumes,
+        skipDestroyPrecheck,
+        false /* skipUpdateNodeState */);
+  }
+
+  public SubTaskGroup createDestroyServerTasks(
+      Universe universe,
+      Collection<NodeDetails> nodes,
+      Function<NodeDetails, Boolean> isForceDelete,
+      boolean deleteNode,
+      boolean deleteRootVolumes,
+      boolean skipDestroyPrecheck,
+      boolean skipUpdateNodeState) {
     SubTaskGroup subTaskGroup = createSubTaskGroup("AnsibleDestroyServers");
     UserIntent userIntent = universe.getUniverseDetails().getPrimaryCluster().userIntent;
     nodes = filterUniverseNodes(universe, nodes, n -> true);
@@ -2323,6 +2341,7 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
       params.nodeIP = node.cloudInfo.private_ip;
       params.useSystemd = userIntent.useSystemd;
       params.otelCollectorInstalled = universe.getUniverseDetails().otelCollectorEnabled;
+      params.skipUpdateNodeState = skipUpdateNodeState;
       // Create the Ansible task to destroy the server.
       AnsibleDestroyServer task = createTask(AnsibleDestroyServer.class);
       task.initialize(params);
@@ -7375,10 +7394,13 @@ public abstract class UniverseTaskBase extends AbstractTaskBase {
           !BackupCategory.YB_BACKUP_SCRIPT.equals(scheduleParams.backupCategory)
               && universe.isYbcEnabled()
               && !scheduleParams.backupType.equals(TableType.REDIS_TABLE_TYPE);
-      // Upgrade YBC version on universe
+      // Upgrade YBC version on universe. Universes using YBDB inbuilt YBC get YBC from the DB
+      // image, so YBA must not install or version it here.
       if (ybcBackup
           && universe.isYbcEnabled()
-          && !universe.getUniverseDetails().getYbcSoftwareVersion().equals(stableYbcVersion)) {
+          && !universe.getUniverseDetails().getPrimaryCluster().userIntent.isUseYbdbInbuiltYbc()
+          && !StringUtils.equals(
+              universe.getUniverseDetails().getYbcSoftwareVersion(), stableYbcVersion)) {
         if (Util.isKubernetesBasedUniverse(universe)) {
           createUpgradeYbcTaskOnK8s(universe.getUniverseUUID(), stableYbcVersion)
               .setSubTaskGroupType(SubTaskGroupType.UpgradingYbc);
