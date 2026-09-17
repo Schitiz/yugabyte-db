@@ -1099,7 +1099,7 @@ YBInitPostgresBackend(const char *program_name, const YbcPgInitPostgresInfo *ini
 			hex_encode((const char *) YbGetLocalTServerUuid(), UUID_LEN, hex_uuid);
 			hex_uuid[2 * UUID_LEN] = '\0';
 
-			YBCInitDistTrace(MyProcPid, hex_uuid);
+			YBCInitDistTrace(hex_uuid);
 
 			/* Hooks that close node spans left open by a query abort. */
 			YbDistTraceInstallExecutorHooks();
@@ -1111,7 +1111,7 @@ void
 YBOnPostgresBackendShutdown()
 {
 	if (YBCIsDistTraceEnabled())
-		YBCCleanupDistTrace();
+		YBCShutdownDistTrace();
 
 	YBCDestroyPgGate();
 }
@@ -10107,11 +10107,16 @@ YbGetSkipIntentsOptimizationInfo(Relation rel, bool is_write)
 	if (skip_intents_txn_state.disabled)
 		return info;
 
-	bool is_rc = IsYBReadCommitted();
 	/*
-	 * In non-RC isolation, only do skip intents optimization for top-level DDL.
+	 * Serializable is the one isolation level restricted to top-level DDL. Its operations
+	 * carry no read time and read at the latest time, so there is no read time to point at
+	 * in_txn_limit. Nor is there an in_txn_limit to point it at, which
+	 * leaves the Halloween problem open even without this optimization (#33802). Every
+	 * other isolation level carries a read time that read_at_in_txn_limit moves, so it may
+	 * run inside a transaction block.
 	 */
-	bool top_level_only = !yb_enable_new_relation_fastpath_write_in_txn_blocks || !is_rc;
+	bool is_serializable = XactIsoLevel == XACT_SERIALIZABLE;
+	bool top_level_only = !yb_enable_new_relation_fastpath_write_in_txn_blocks || is_serializable;
 	bool is_top_level = !IsTransactionBlock() &&
 						GetCurrentTransactionNestLevel() == 1 &&
 						YbGetTriggerDepth() == 0 &&
@@ -10126,19 +10131,18 @@ YbGetSkipIntentsOptimizationInfo(Relation rel, bool is_write)
 			return info;
 		}
 		/*
-		 * Here we assume that a top-level DDL (e.g. CREATE TABLE AS SELECT) never
-		 * needs to read its own newly created table. Otherwise in non-RC isolation
-		 * this optimization will not be valid.
+		 * A top-level statement is the whole transaction, so nothing reads the relation
+		 * after it. Here we assume that a top-level DDL (e.g. CREATE TABLE AS SELECT)
+		 * never needs to read its own newly created table. Otherwise this optimization
+		 * will not be valid in Serializable, which cannot read at the in_txn_limit.
 		 */
 	}
 
 	/*
-	 * In RC isolation, non-top-level requires transactional DDL support.
+	 * Non-top-level work requires transactional DDL support. Only a transaction block can
+	 * reach here with is_top_level false, so the GUC that allows it is known to be on.
 	 */
-	bool requires_transactional_ddl = !is_top_level && is_rc;
-	bool fastpath_in_txn_blocks_supported =
-		yb_enable_new_relation_fastpath_write_in_txn_blocks && YBIsDdlTransactionBlockEnabled();
-	if (requires_transactional_ddl && !fastpath_in_txn_blocks_supported)
+	if (!is_top_level && !YBIsDdlTransactionBlockEnabled())
 	{
 		elog(DEBUG2, "Skip intents not applicable: relation %u requires transactional DDL support", rel->rd_id);
 		return info;
@@ -10373,10 +10377,20 @@ YBCMakeStatusErrorData(YbcStatus status)
 	switch (pg_err_code)
 	{
 		case ERRCODE_UNIQUE_VIOLATION:
-			*msg = (YbStatusErrorDataFormatText) {"duplicate key value violates unique constraint \"%s\"",
-												   1, (const char **) palloc(sizeof(const char *))};
-			(msg->args)[0] = FetchUniqueConstraintName(YBCStatusRelationOid(status));
-			break;
+			{
+				const Oid	relation_oid = YBCStatusRelationOid(status);
+
+				/*
+				 * A status without a relation OID (e.g. an index backfill
+				 * failure) already carries a full PG error message.
+				 */
+				if (!OidIsValid(relation_oid))
+					break;
+				*msg = (YbStatusErrorDataFormatText) {"duplicate key value violates unique constraint \"%s\"",
+													   1, (const char **) palloc(sizeof(const char *))};
+				(msg->args)[0] = FetchUniqueConstraintName(relation_oid);
+				break;
+			}
 		case ERRCODE_YB_TXN_ABORTED:
 			*detail = *msg;
 			*msg = (YbStatusErrorDataFormatText) {"current transaction is expired or aborted"};

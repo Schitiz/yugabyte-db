@@ -108,7 +108,7 @@ func (h *ConfigureServerHandler) Handle(ctx context.Context) (*pb.DescribeTaskRe
 		util.FileLogger().Errorf(ctx, "Configure server failed in %v - %s", cmd, err.Error())
 		return nil, err
 	}
-	if cmdInfo.StdOut.String() != yb_metrics_dir {
+	if strings.TrimSpace(cmdInfo.StdOut.String()) != yb_metrics_dir {
 		yb_metrics_dir = filepath.Join(h.param.GetYbHomeDir(), "metrics")
 	}
 
@@ -246,6 +246,17 @@ func (h *ConfigureServerHandler) setupServerScript(
 		"yb_metrics_dir":    yb_metrics_dir,
 		"configure_cgroup":  h.param.GetConfigureCgroup(),
 	}
+	if h.param.AcceptableClockSkewWaitEnabled != nil {
+		serverScriptContext["is_acceptable_clock_skew_wait_enabled"] =
+			h.param.GetAcceptableClockSkewWaitEnabled()
+	}
+	if h.param.AcceptableClockSkewSec != nil {
+		serverScriptContext["acceptable_clock_skew_sec"] = h.param.GetAcceptableClockSkewSec()
+	}
+	if h.param.AcceptableClockSkewMaxTries != nil {
+		serverScriptContext["acceptable_clock_skew_max_tries"] =
+			h.param.GetAcceptableClockSkewMaxTries()
+	}
 
 	for _, fileInfo := range ScriptFilesToCopy {
 		_, err := module.CopyFile(
@@ -314,6 +325,31 @@ func (h *ConfigureServerHandler) execShellCommands(
 				filepath.Join(home, "cores"),
 			),
 		},
+		// The health check writes its log here. Only logs/ goes to the data partition -
+		// metrics/ itself holds the node_exporter textfiles the collector rewrites each run,
+		// and they belong where node_exporter is configured to look.
+		{"make-metrics-logs-dir", fmt.Sprintf(
+			"mkdir -p %s && chmod 0755 %s",
+			filepath.Join(mountPoint, "metrics/logs"),
+			filepath.Join(mountPoint, "metrics/logs"),
+		)},
+		{"make-yb-metrics-dir", fmt.Sprintf("mkdir -p %s", filepath.Join(home, "metrics"))},
+		// Not a plain "rm -rf && ln -sf": a YBA upgrade puts the health check script on nodes
+		// before their next configure and it logs here from its first run, so a real directory
+		// found here holds logs someone reading a support bundle wants - move them across
+		// rather than delete them. ln -sfn, or a second run links inside the first link.
+		{"symlink-metrics-logs", fmt.Sprintf(
+			"if [ ! -L %s ] && [ -d %s ]; then "+
+				"cp -a %s/. %s/ 2>/dev/null || true; rm -rf %s; fi; "+
+				"ln -sfn %s %s",
+			filepath.Join(home, "metrics/logs"),
+			filepath.Join(home, "metrics/logs"),
+			filepath.Join(home, "metrics/logs"),
+			filepath.Join(mountPoint, "metrics/logs"),
+			filepath.Join(home, "metrics/logs"),
+			filepath.Join(mountPoint, "metrics/logs"),
+			filepath.Join(home, "metrics/logs"),
+		)},
 	}
 	if err := module.RunShellSteps(ctx, h.username, steps, h.logOut); err != nil {
 		return err
