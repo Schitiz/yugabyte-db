@@ -34,6 +34,7 @@
 #include "yb/common/pg_types.h"
 #include "yb/common/ql_value.h"
 #include "yb/common/schema.h"
+#include "yb/common/transaction.h"
 
 #include "yb/dockv/pg_key_decoder.h"
 #include "yb/dockv/pg_row.h"
@@ -80,6 +81,7 @@
 #include "yb/yql/pggate/pg_global_view_read.h"
 #include "yb/yql/pggate/util/ybc-internal.h"
 #include "yb/yql/pggate/util/ybc_util.h"
+#include "yb/yql/pggate/ybc_gflags.h"
 #include "yb/yql/pggate/ybc_pg_typedefs.h"
 
 DEFINE_UNKNOWN_int32(pggate_num_connections_to_server, 1,
@@ -279,7 +281,13 @@ Status GetSplitPoints(YbcPgTableDesc table_desc,
 }
 
 void YBCStartSysTablePrefetchingImpl(std::optional<PrefetcherOptions::CachingInfo> caching_info) {
-  pgapi->StartSysTablePrefetching({caching_info, implicit_cast<uint64_t>(yb_fetch_row_limit)});
+  const auto* flags = YBCGetGFlags();
+  const auto configured_size_limit = *flags->ysql_catalog_prefetch_size_limit;
+  const auto max_size_limit = YBCGetMaxRpcResponseSize();
+  pgapi->StartSysTablePrefetching({
+      caching_info,
+      *flags->ysql_catalog_prefetch_row_limit,
+      configured_size_limit ? std::min(configured_size_limit, max_size_limit) : max_size_limit});
 }
 
 PrefetchingCacheMode YBCMapPrefetcherCacheMode(YbcPgSysTablePrefetcherCacheMode mode) {
@@ -621,6 +629,14 @@ YbcStatus YBCPgDestroyMemctx(YbcPgMemctx memctx) {
 
 void YBCPgResetCatalogReadTime() {
   pgapi->ResetCatalogReadTime();
+}
+
+void YBCPgSetHistoricalReadContext(YbcReadHybridTime read_time, const char* transaction_id) {
+  pgapi->SetHistoricalReadContext(MakeReadHybridTime(read_time), transaction_id);
+}
+
+void YBCPgResetHistoricalReadContext() {
+  pgapi->ResetHistoricalReadContext();
 }
 
 YbcReadHybridTime YBCGetPgCatalogReadTime() {
@@ -3057,6 +3073,9 @@ YbcStatus YBCPgGetCDCConsistentChanges(
       }
     }
 
+    const auto& docdb_txn_id = row_message_pb.transaction_id();
+    const bool has_docdb_txn_id = !docdb_txn_id.empty();
+
     new (&resp_rows[row_idx]) YbcPgRowMessage{
         .col_count = col_count,
         .cols = cols,
@@ -3064,12 +3083,21 @@ YbcStatus YBCPgGetCDCConsistentChanges(
         .commit_time = static_cast<uint64_t>(
             YBCGetPgCallbacks()->UnixEpochToPostgresEpoch(commit_time_ht.GetPhysicalValueMicros())),
         .commit_time_ht = commit_time_ht.ToUint64(),
+        .record_time_ht =
+            row_message_pb.has_record_time() ? row_message_pb.record_time() : 0,
         .action = GetRowMessageAction(row_message_pb),
         .table_oid = table_oid,
         .lsn = row_message_pb.pg_lsn(),
         .xid = row_message_pb.pg_transaction_id(),
         .xrepl_origin_id =
-            row_message_pb.has_xrepl_origin_id() ? row_message_pb.xrepl_origin_id() : 0};
+            row_message_pb.has_xrepl_origin_id() ? row_message_pb.xrepl_origin_id() : 0,
+        .has_docdb_txn_id = has_docdb_txn_id,
+        .docdb_txn_id = {}};
+    if (has_docdb_txn_id) {
+      snprintf(
+          resp_rows[row_idx].docdb_txn_id, sizeof(resp_rows[row_idx].docdb_txn_id), "%s",
+          docdb_txn_id.c_str());
+    }
 
     min_resp_lsn = std::min(min_resp_lsn, row_message_pb.pg_lsn());
     max_resp_lsn = std::max(max_resp_lsn, row_message_pb.pg_lsn());
