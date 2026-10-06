@@ -171,6 +171,8 @@ Compile / managedClasspath += baseDirectory.value / "target/scala-2.13/"
 version := sys.process.Process("cat version.txt").lineStream_!.head
 Global / onChangedBuildSource := ReloadOnSourceChanges
 
+// Flyway 10+ ships database support as separate modules; the postgresql one is required.
+val flywayVersion = "13.8.0"
 val bouncyCastleFipsVersion = "2.1.1"
 val bouncyCastleUtilFipsVersion = "2.1.7"
 
@@ -192,7 +194,8 @@ libraryDependencies ++= Seq(
   "org.apache.httpcomponents.core5" % "httpcore5-h2" % "5.4.3",
   "org.apache.httpcomponents.client5" % "httpclient5" % "5.6.4",
   "org.apache.mina" % "mina-core" % "2.2.9",
-  "org.flywaydb" %% "flyway-play" % "9.0.0",
+  "org.flywaydb" % "flyway-core" % flywayVersion,
+  "org.flywaydb" % "flyway-database-postgresql" % flywayVersion,
   // https://github.com/YugaByte/cassandra-java-driver/releases
   "com.yugabyte" % "java-driver-core" % "4.15.0-yb-3",
   "org.yaml" % "snakeyaml" % "2.1",
@@ -314,7 +317,7 @@ libraryDependencies ++= Seq(
   // aarch64 binaries (same PG 14.5) so the embedded server starts natively there.
   "io.zonky.test.postgres" % "embedded-postgres-binaries-darwin-arm64v8" % "14.5.0" % Test,
   "org.springframework" % "spring-test" % "5.3.9" % Test,
-  "com.yugabyte" % "yba-client-v2" % "1.8.6" % Test,
+  "com.yugabyte" % "yba-client-v2" % "1.8.7" % Test,
   "io.fabric8" % "kubernetes-server-mock" % "6.14.0" % Test
 )
 
@@ -747,7 +750,7 @@ lazy val javagen = project.in(file("client/java"))
     openApiGenerateApiTests := SettingDisabled,
     openApiValidateSpec := SettingDisabled,
     openApiConfigFile := "client/java/openapi-java-config.json",
-    version := "1.0.1",
+    version := "1.0.2",
     target := file("client/java/target/v1"),
   )
 
@@ -763,7 +766,7 @@ lazy val javaGenV2Client = project.in(file("client/java"))
     openApiConfigFile := "client/java/openapi-java-config-v2.json",
     openApiGlobalProperties += ("skipFormModel" -> "false"),
     openApiTemplateDir := (baseDirectory.value / resDir / "openapi_templates/clients/v2").absolutePath,
-    version := "1.8.6",
+    version := "1.8.7",
     target := file("client/java/target/v2"),
   )
 

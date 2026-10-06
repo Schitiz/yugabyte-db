@@ -908,6 +908,7 @@ static char *yb_effective_transaction_isolation_level_string;
 static char *yb_xcluster_consistency_level_string;
 static char *yb_read_time_string;
 static char *yb_neg_catcache_ids_string;
+static char *yb_test_catalog_preload_cache_list_string;
 static bool yb_conn_mgr_modifying_defaults = false;
 bool		yb_test_skip_binding_scan_keys;
 bool		yb_enable_advanced_index_cond_fold;
@@ -3978,6 +3979,18 @@ static struct config_bool ConfigureNamesBool[] =
 	},
 
 	{
+		{"yb_enable_xcluster_analyze_replication", PGC_SIGHUP, CUSTOM_OPTIONS,
+			gettext_noop("Autoflag to enable capturing ANALYZE for xCluster DDL "
+						 "replication. Not to be touched by users."),
+			NULL,
+			GUC_NOT_IN_SAMPLE
+		},
+		&yb_enable_xcluster_analyze_replication,
+		true,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"yb_enable_pg_stat_statements_rpc_stats", PGC_SUSET, STATS_MONITORING,
 			gettext_noop("If true, enable RPC execution time stats for pg_stat_statements."),
 			NULL,
@@ -6314,6 +6327,21 @@ static struct config_int ConfigureNamesInt[] =
 	},
 
 	{
+		{"yb_startup_free_memory_release_threshold", PGC_SIGHUP, RESOURCES_MEM,
+			gettext_noop("When a backend finishes connection startup, return "
+						 "the free memory held by TCMalloc to the operating "
+						 "system if it is at least this amount."),
+			gettext_noop("0 (the default) always releases. -1 disables the release."),
+			GUC_UNIT_KB
+		},
+		&yb_startup_free_memory_release_threshold,
+		0,
+		-1,
+		INT_MAX,
+		NULL, NULL, NULL
+	},
+
+	{
 		{"yb_test_index_check_num_batches_per_snapshot", PGC_USERSET, DEVELOPER_OPTIONS,
 			gettext_noop("Used to test yb_index_check()"),
 			gettext_noop("If set to > 0, number of index rows processed per snapshot "
@@ -7716,6 +7744,22 @@ static struct config_string ConfigureNamesString[] =
 		"",
 		yb_check_neg_catcache_ids,
 		yb_set_neg_catcache_ids, NULL
+	},
+
+	{
+		{"yb_test_catalog_preload_cache_list", PGC_SIGHUP, DEVELOPER_OPTIONS,
+			gettext_noop("Catalog caches to fill when preloading the catalog."),
+			gettext_noop("A comma separated list of catalogs, catalog caches, or "
+						 "indexes of catalog caches. If set, "
+						 "ysql_catalog_preload_additional_tables and "
+						 "ysql_catalog_preload_additional_table_list are "
+						 "ignored for prefetch and prefill."),
+			GUC_LIST_INPUT | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE
+		},
+		&yb_test_catalog_preload_cache_list_string,
+		"",
+		yb_check_test_catalog_preload_cache_list,
+		yb_assign_test_catalog_preload_cache_list, NULL
 	},
 
 	{
